@@ -7,7 +7,7 @@ describe('session assist prompt', () => {
   it('asks for reply options with the three outcomes only when the suggestion is requested', () => {
     const both = buildAssistSystemPrompt({ recap: true, suggestion: true });
     expect(both).toContain('"options" (array of strings)');
-    expect(both).toContain('Pick exactly one outcome');
+    expect(both).toContain('options is usually []');
     expect(both).toContain('at most 80 characters');
     expect(both).toContain('reports the work as done');
 
