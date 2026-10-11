@@ -1,9 +1,16 @@
 # Session assist
 
-The server generates a short reminder of recent work and an optional next user
-message with Small Model. Results live in `metadata.openchamber.assist` with
-`recap`, `suggestion`, `forMessageID`, and `generatedAt`. The payload shape is
-unchanged; an empty suggestion is a successful outcome.
+The server generates a short reminder of recent work and, with Small Model,
+either an optional next user message or a few short replies to the agent's
+closing question. Results live in `metadata.openchamber.assist` with `recap`,
+`suggestion`, `options`, `forMessageID`, and `generatedAt`. An empty
+suggestion with no options is a successful outcome.
+
+`options` is an array of 2 or 3 strings, or empty. It was added after the
+other fields; a client that does not read it sees an empty suggestion on a
+decision turn and shows nothing. The runtime always writes the array, because
+the metadata store merges a payload into the stored one and an omitted field
+would keep an older turn's options.
 
 ## Ownership
 
@@ -114,11 +121,21 @@ model context is small. Page/count bounds are not a network-byte quota.
    A different model on the same machine, configured or found by the family
    scan, is still used.
 5. Recap describes the substantive work and its current result, including the
-   work behind a closing commit or acknowledgment. Suggestion is independent:
-   only unfinished requested agent work should produce a sendable user message.
-   Completed work, optional offers, or a decision/action belonging to the user
-   should return an empty suggestion. This is model judgment, not authorization
-   enforcement or a guarantee that every generated field is factually correct.
+   work behind a closing commit or acknowledgment. Suggestion and options are
+   independent of it and come from the same call, with one of three outcomes:
+   unfinished requested agent work gives one sendable `suggestion`; an answer
+   that ends by asking the user to choose, approve, or answer something a few
+   words settle gives 2 or 3 `options` in the user's voice; everything else,
+   including completed work, a closing line that reports the work as done,
+   optional offers, and questions only the user can answer (a name, a secret,
+   a description), gives neither. This is model judgment: no status line or
+   other project wording is parsed in code. It is not authorization
+   enforcement or a guarantee that every generated field is correct.
+   The runtime checks the options itself: each is trimmed and dropped when
+   empty, over 80 characters, a case-insensitive duplicate, or in a script the
+   user did not write (the mismatch guard below). Fewer than two survivors
+   drop the set; more than three keep the first three. Surviving options
+   clear the suggestion, so a payload never carries both.
 6. Re-read the latest message and fresh session before writing. A moved tail,
    canceled run, changed endpoint/directory, archive, revert, or failed fresh
    read discards the result. Never merge from the old pre-generation metadata.
@@ -132,7 +149,8 @@ No failed session blocks another session.
 ## Settings and consumers
 
 `sessionRecapEnabled` and `sessionSuggestionEnabled` default on and are checked
-before work and before writing. The Jev gate is a cost filter under these same
+before work and before writing. `sessionSuggestionEnabled` covers
+`options` as well: with it off they are neither requested nor written. The Jev gate is a cost filter under these same
 switches, not a setting of its own: it reads the same three turns as the recap,
 so a recap still follows a closing "thanks" after real work. With both off there are no reads, model calls,
 or writes. With one on, the shared recent context is still available, but only
@@ -152,7 +170,9 @@ payloads written by an earlier process; the `time.idle` rule retires those.
 - `packages/ui/src/lib/sessionAssistMetadata.ts` parses the payload and owns freshness.
 - `packages/ui/src/hooks/useSessionAssist.ts` adds live-status and settings gating.
 - `SessionRecapSpacer` shows the reminder in the reserved gap under the reply.
-- `SessionSuggestionChip` fills the composer; it never sends automatically.
+- `SessionSuggestionChip` and the composer's ghost text fill the composer;
+  neither ever sends. Options never answer a question form or a permission
+  request; both keep their own UI. See `packages/ui/src/components/chat/composer/DOCUMENTATION.md`.
 - Sidebar rows (`SessionNodeItem`, Projects view) show the current recap in
   the whole-row tooltip under the same freshness rule, hidden while a turn runs
   and when `sessionRecapEnabled` is off. The sidebar no longer marks open

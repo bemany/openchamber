@@ -75,8 +75,15 @@ afterEach(() => {
 describe('session work decisions', () => {
   it('keeps an assist field Jev did not answer, and drops only a clear no', () => {
     expect(decideAssist({})).toEqual({ recap: true, suggestion: true });
-    expect(decideAssist({ recap: { noul: 0.2 }, next_step: { noul: 0.1 } })).toEqual({ recap: false, suggestion: false });
-    expect(decideAssist({ recap: { noul: 0.6 }, next_step: { noul: 0.7 } })).toEqual({ recap: true, suggestion: true });
+    expect(decideAssist({ recap: { noul: 0.2 }, next_step: { noul: 0.1 }, awaits_reply: { noul: 0.1 } })).toEqual({ recap: false, suggestion: false });
+    expect(decideAssist({ recap: { noul: 0.6 }, next_step: { noul: 0.7 }, awaits_reply: { noul: 0.1 } })).toEqual({ recap: true, suggestion: true });
+  });
+
+  it('keeps the suggestion field for a turn that waits on a short user decision', () => {
+    expect(decideAssist({ next_step: { noul: 0.1 }, awaits_reply: { noul: 0.8 } })).toEqual({ recap: true, suggestion: true });
+    // Either question left unanswered keeps the field allowed.
+    expect(decideAssist({ next_step: { noul: 0.1 } })).toEqual({ recap: true, suggestion: true });
+    expect(decideAssist({ awaits_reply: { noul: 0.1 } })).toEqual({ recap: true, suggestion: true });
   });
 });
 
@@ -164,13 +171,13 @@ describe('session work runtime: a turn ended', () => {
   it('asks only the assist and review questions for a session not in work, and never opens it', async () => {
     stubOpenCode();
     const { runtime, jev, records } = makeRuntime({
-      answers: { recap: { noul: 0.9 }, next_step: { noul: 0.1 } },
+      answers: { recap: { noul: 0.9 }, next_step: { noul: 0.1 }, awaits_reply: { noul: 0.2 } },
     });
 
     const gate = await runtime.evaluateTurnEnd({ sessionId: 'ses_1', directory: '/repo', assist: { recap: true, suggestion: true } });
 
     expect(jev.ask).toHaveBeenCalledTimes(1);
-    expect(Object.keys(jev.ask.mock.calls[0][0].questions).sort()).toEqual(['next_step', 'recap', 'review_ready']);
+    expect(Object.keys(jev.ask.mock.calls[0][0].questions).sort()).toEqual(['awaits_reply', 'next_step', 'recap', 'review_ready']);
     expect(jev.ask.mock.calls[0][0].state).toMatchObject({ request: 'Implement it', answer: 'Done, try it.' });
     expect(gate).toEqual({ recap: true, suggestion: false });
     expect(records.get('ses_1')).toEqual({});

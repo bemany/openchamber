@@ -81,7 +81,12 @@ whether a message started work, and every session now counts instead.
 - A turn ended: session assist calls `evaluateTurnEnd` before it arms its quiet
   window. One call carries only the questions that apply: `wrap_up` while in
   work, `review_ready` while the review offer is on, `recap` / `next_step` for
-  the assist fields the user has on. No applicable question, no call.
+  the assist fields the user has on. `next_step` comes with `awaits_reply`:
+  its wording answers no for a turn that waits on the user, and
+  `awaits_reply` keeps the suggestion field for one that ends on a short
+  decision, which session assist answers with reply options. Either at 0.5 or
+  above, or either left unanswered, allows the field. No applicable question,
+  no call.
 - Jev reads the request's first 1500 characters, the answer's first and last
   500, and three earlier turns cut as routing cuts them.
 
@@ -106,6 +111,8 @@ without edits. The lab is `julia-lab/jev-work` (`run-review.mjs`,
 `recap` stayed high (0.86–0.96) after a closing "thanks"/"commit" that followed
 real work, because it reads the same three turns the recap does. Do not change
 the wording or thresholds without re-running this measurement.
+`awaits_reply` and its 0.5 threshold are a first value and have not been
+measured yet; check them on recorded sessions before relying on them.
 
 ## Settings
 

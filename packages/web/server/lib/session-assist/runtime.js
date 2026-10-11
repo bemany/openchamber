@@ -5,6 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { OpenCode } from '@opencode/client';
+import { z } from 'zod';
 import { readMergedSettingsSync } from '../opencode/settings-files.js';
 import { loadAssistContext, newestContentId } from './context.js';
 import { buildAssistPrompt, buildAssistSystemPrompt } from './prompt.js';
@@ -27,6 +28,9 @@ const getSessionAssistTargets = () => {
 const IDLE_QUIET_MS = 60_000;
 const RECAP_CHAR_LIMIT = 320;
 const SUGGESTION_CHAR_LIMIT = 500;
+const OPTION_CHAR_LIMIT = 80;
+const MIN_OPTIONS = 2;
+const MAX_OPTIONS = 3;
 const FETCH_TIMEOUT_MS = 5_000;
 const GENERATION_TIMEOUT_MS = 120_000;
 // Enough records to look past the idle marker and a couple of switches.
@@ -51,6 +55,30 @@ const extractJsonObject = (value) => {
     }
   }
   return null;
+};
+
+/**
+ * Reply options as stored: trimmed, at most 80 characters, unique ignoring
+ * case, and neither empty nor rejected by `rejects` (the script guard). Fewer
+ * than two survivors mean no options at all; more than three keep the first.
+ */
+const replyOption = z.string().transform((text) => text.trim());
+
+const validReplyOptions = (value, rejects) => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const kept = [];
+  for (const entry of value) {
+    const parsed = replyOption.safeParse(entry);
+    if (!parsed.success) continue;
+    const text = parsed.data;
+    if (!text || text.length > OPTION_CHAR_LIMIT || rejects(text)) continue;
+    const key = text.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push(text);
+  }
+  return kept.length >= MIN_OPTIONS ? kept.slice(0, MAX_OPTIONS) : [];
 };
 
 const extractSessionStatus = (payload) => {
@@ -218,7 +246,10 @@ export const createSessionAssistRuntime = ({
       || (hasCjk(text) && !hasCjk(prompt.language)));
     if (recap && scriptMismatch(recap)) recap = '';
     if (suggestion && scriptMismatch(suggestion)) suggestion = '';
-    if (!recap && !suggestion) return;
+    let options = targets.suggestion ? validReplyOptions(structured?.options, scriptMismatch) : [];
+    // A decision turn has no continuation: options win when both came back.
+    if (options.length > 0) suggestion = '';
+    if (!recap && !suggestion && options.length === 0) return;
     // v2 lists newest first. The answer is followed by its `idle` marker and
     // possibly a model or agent switch, so read a short tail and compare the
     // newest content record rather than the newest record.
@@ -236,11 +267,17 @@ export const createSessionAssistRuntime = ({
     checkCurrent();
     const enabled = getTargets();
     if (!enabled.recap || !allowed.recap) recap = '';
-    if (!enabled.suggestion || !allowed.suggestion) suggestion = '';
-    if (!recap && !suggestion) return;
+    if (!enabled.suggestion || !allowed.suggestion) {
+      suggestion = '';
+      options = [];
+    }
+    if (!recap && !suggestion && options.length === 0) return;
+    // `options` is always written: the store merges the payload into the
+    // stored one, so leaving it out would keep an older turn's options.
     await persistSessionAssist(sessionId, directory, {
       recap,
       suggestion,
+      options,
       forMessageID: last.id,
       generatedAt: Date.now(),
     });
