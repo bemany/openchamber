@@ -44,7 +44,9 @@
 #   ACTIVITY_WAIT_INTERVAL     Sekunden zwischen zwei Abfragen beim Warten, Default 10
 #   ACTIVITY_SETTLE_SECONDS    Nachlauf nach dem Ende der Aufrufer, Default ACTIVITY_RECENT_SECONDS
 #   ACTIVITY_DATE_CMD          Uhr in Sekunden für die Warteschleife, Default "date +%s"
-#  Zahlen müssen nicht-negative Ganzzahlen sein (Intervall mindestens 1), sonst blockiert.
+#  Zahlen müssen nicht-negative Ganzzahlen innerhalb ihrer Grenzen sein (siehe
+#  activity_int-Aufrufe; Intervall mindestens 1), sonst blockiert. Jeder Uhrwert
+#  wird geprüft; eine kaputte Uhr beendet das Warten als Zeitüberschreitung.
 #   ACTIVITY_TAG               Präfix der Ausgabezeilen
 
 ACTIVITY_DB="${ACTIVITY_DB:-$HOME/.local/share/opencode/opencode.db}"
@@ -62,16 +64,24 @@ ACTIVITY_TAG="${ACTIVITY_TAG:-[activity]}"
 
 activity_say() { echo "$ACTIVITY_TAG $*"; }
 
-# activity_int <name> <wert> [minimum]: nicht-negative Ganzzahl ohne führende
-# Null, höchstens 15 Stellen, >= minimum. Sonst Meldung auf stdout und Exit 1.
+# activity_int <name> <wert> [minimum] [maximum]: nicht-negative Ganzzahl ohne
+# führende Null, höchstens 15 Stellen, im Bereich. Sonst Meldung auf stdout, Exit 1.
+# Die Grenzen halten alle späteren Multiplikationen weit unter 64 Bit.
 activity_int() {
   case "$2" in
     '' | *[!0-9]* | 0?* | ????????????????*) echo "$1 ungültig: '$2' (nicht-negative Ganzzahl erwartet)"; return 1 ;;
   esac
   [ "$2" -ge "${3:-0}" ] || { echo "$1 ungültig: '$2' (mindestens ${3:-0})"; return 1; }
+  [ -z "${4:-}" ] || [ "$2" -le "$4" ] || { echo "$1 ungültig: '$2' (höchstens $4)"; return 1; }
 }
 
 activity_clock() { eval "${ACTIVITY_DATE_CMD:-date +%s}"; }
+
+# Uhr lesen und prüfen: setzt _c (Sekunden), Exit 1 bei Fehler oder ungültigem Wert
+activity_now_s() {
+  _c=$(activity_clock 2>/dev/null) || { _c="Fehlercode $?"; return 1; }
+  activity_int Uhr "$_c" 0 9999999999 > /dev/null
+}
 
 # Wert einer Option aus einer Befehlszeile ("--name N" oder "--name=N")
 activity_opt() {
@@ -220,14 +230,15 @@ activity_wait_ignored() {
   _timeout=${ACTIVITY_WAIT_TIMEOUT:-900}
   _settle=${ACTIVITY_SETTLE_SECONDS:-$ACTIVITY_RECENT_SECONDS}
   _int=${ACTIVITY_WAIT_INTERVAL:-10}
-  _bad=$(activity_int ACTIVITY_WAIT_TIMEOUT "$_timeout" && activity_int ACTIVITY_SETTLE_SECONDS "$_settle" &&
-    activity_int ACTIVITY_WAIT_INTERVAL "$_int" 1) || { activity_say "$_bad"; return 1; }
-  _t=$(activity_clock) && activity_int Uhr "$_t" >/dev/null || { activity_say "Uhr nicht lesbar: '$_t'"; return 1; }
-  _deadline=$((_t + _timeout))
+  _bad=$(activity_int ACTIVITY_WAIT_TIMEOUT "$_timeout" 0 86400 && activity_int ACTIVITY_SETTLE_SECONDS "$_settle" 0 86400 &&
+    activity_int ACTIVITY_WAIT_INTERVAL "$_int" 1 3600) || { activity_say "$_bad"; return 1; }
+  activity_now_s || { activity_say "Uhr nicht lesbar: '$_c'"; return 1; }
+  _deadline=$((_c + _timeout))
   _last=
   activity_say "Warte, bis die Aufrufer-Sessions fertig sind: $(printf '%s' "$_ids" | tr '\n' ' ')(höchstens $_timeout s inkl. $_settle s Nachlauf)"
   while :; do
-    _rest=$((_deadline - $(activity_clock)))
+    activity_now_s || { activity_say "Uhr nicht lesbar: '$_c'"; activity_say "Zeitüberschreitung (Uhr)"; return 1; }
+    _rest=$((_deadline - _c))
     if [ "$_rest" -le 0 ]; then
       activity_say "Zeitüberschreitung nach $_timeout s"
       return 1
@@ -235,7 +246,8 @@ activity_wait_ignored() {
     _now_msg=
     if _still=$(activity_ignored_live "$_ids"); then
       if [ -z "$_still" ]; then
-        _rest=$((_deadline - $(activity_clock)))
+        activity_now_s || { activity_say "Uhr nicht lesbar: '$_c'"; activity_say "Zeitüberschreitung (Uhr)"; return 1; }
+        _rest=$((_deadline - _c))
         if [ "$_rest" -lt "$_settle" ]; then
           activity_say "Aufrufer-Sessions laufen nicht mehr, aber der Nachlauf ($_settle s) passt nicht mehr ins Restbudget ($_rest s)"
           activity_say "Zeitüberschreitung nach $_timeout s"
@@ -245,7 +257,8 @@ activity_wait_ignored() {
         sleep "$_settle"
         if _still=$(activity_ignored_live "$_ids"); then
           if [ -z "$_still" ]; then
-            if [ "$(activity_clock)" -ge "$_deadline" ]; then
+            activity_now_s || { activity_say "Uhr nicht lesbar: '$_c'"; activity_say "Zeitüberschreitung (Uhr)"; return 1; }
+            if [ "$_c" -ge "$_deadline" ]; then
               activity_say "Zeitüberschreitung nach $_timeout s"
               return 1
             fi
@@ -265,7 +278,8 @@ activity_wait_ignored() {
     fi
     [ -z "$_now_msg" ] || [ "$_now_msg" = "$_last" ] || activity_say "$_now_msg"
     _last=$_now_msg
-    _rest=$((_deadline - $(activity_clock)))
+    activity_now_s || { activity_say "Uhr nicht lesbar: '$_c'"; activity_say "Zeitüberschreitung (Uhr)"; return 1; }
+    _rest=$((_deadline - _c))
     _sl=$_int
     [ "$_rest" -ge "$_sl" ] || _sl=$_rest
     [ "$_sl" -le 0 ] || sleep "$_sl"
@@ -281,10 +295,10 @@ activity_check() {
 
   # Zahlen aus der Umgebung prüfen, bevor gerechnet wird; ungültig = blockiert
   _recent_s=$ACTIVITY_RECENT_SECONDS
-  _bad=$(activity_int ACTIVITY_RECENT_SECONDS "$_recent_s") || { activity_add "BLOCK  $_bad"; _recent_s=0; }
-  _bad=$(activity_int OPENCHAMBER_PORT "$OPENCHAMBER_PORT") || activity_add "BLOCK  $_bad"
+  _bad=$(activity_int ACTIVITY_RECENT_SECONDS "$_recent_s" 0 86400) || { activity_add "BLOCK  $_bad"; _recent_s=0; }
+  _bad=$(activity_int OPENCHAMBER_PORT "$OPENCHAMBER_PORT" 1 65535) || activity_add "BLOCK  $_bad"
   _now=${ACTIVITY_NOW_MS:-$(($(date +%s) * 1000))}
-  _bad=$(activity_int ACTIVITY_NOW_MS "$_now") || { activity_add "BLOCK  $_bad"; _now=0; }
+  _bad=$(activity_int ACTIVITY_NOW_MS "$_now" 0 9999999999999) || { activity_add "BLOCK  $_bad"; _now=0; }
   _recent_ms=$((_recent_s * 1000))
 
   # Prozessliste einmal erfassen, Exitcode prüfen, dann erst filtern
@@ -333,17 +347,23 @@ activity_check() {
   else
     _reason=$(printf '%s' "$_live" | tail -n 1)
     _live=
-    _bad=
-    [ -z "$ALLOW_STALE_HOURS" ] || _bad=$(activity_int ALLOW_STALE_HOURS "$ALLOW_STALE_HOURS") || :
-    case "$ALLOW_STALE_HOURS" in
-      '' | *[!0-9]* | 0?* | ????????????????*)
+    # ALLOW_STALE_HOURS nur gültig und ≤ 8760 (ein Jahr) als Override
+    _allow=
+    if [ -n "$ALLOW_STALE_HOURS" ]; then
+      if _bad=$(activity_int ALLOW_STALE_HOURS "$ALLOW_STALE_HOURS" 0 8760); then
+        _allow=$ALLOW_STALE_HOURS
+      else
+        activity_add "BLOCK  $_bad"
+      fi
+    fi
+    case "$_allow" in
+      '')
         _mode=none
-        [ -z "$_bad" ] || activity_add "BLOCK  $_bad"
         activity_add "BLOCK  Live-Status nicht verfügbar: ${_reason:-unbekannt} (FORCE=1 oder ALLOW_STALE_HOURS=N)"
         ;;
       *)
         _mode=age
-        _stale_ms=$((ALLOW_STALE_HOURS * 3600000))
+        _stale_ms=$((_allow * 3600000))
         activity_add "WARN   Live-Status nicht verfügbar: ${_reason:-unbekannt}; ALLOW_STALE_HOURS=$ALLOW_STALE_HOURS"
         ;;
     esac

@@ -103,9 +103,14 @@ auch dann, wenn etwas nicht sicher geprüft werden kann:
 3. **Kürzlich geändert**: Sessions mit `session_v2.time_updated` in den letzten 120 s.
 
 Die DB wird nur mit `sqlite3 -readonly` geöffnet. Fehlt sie oder ist sie gesperrt: blockiert.
-Zahlen aus der Umgebung (`ACTIVITY_RECENT_SECONDS`, `ALLOW_STALE_HOURS`, `ACTIVITY_WAIT_TIMEOUT`,
-`ACTIVITY_SETTLE_SECONDS`, `ACTIVITY_WAIT_INTERVAL` ≥ 1, `OPENCHAMBER_PORT`, `ACTIVITY_NOW_MS`) müssen
-nicht-negative Ganzzahlen ohne führende Null sein; sonst blockiert die Prüfung bzw. das Warten mit Meldung.
+Zahlen aus der Umgebung müssen nicht-negative Ganzzahlen ohne führende Null innerhalb ihrer Grenzen sein,
+sonst blockiert die Prüfung bzw. das Warten mit Meldung. Die Grenzen halten alle Multiplikationen weit unter 64 Bit:
+`ACTIVITY_RECENT_SECONDS` ≤ 86400, `ALLOW_STALE_HOURS` ≤ 8760, `ACTIVITY_WAIT_TIMEOUT` ≤ 86400,
+`ACTIVITY_SETTLE_SECONDS` ≤ 86400, `ACTIVITY_WAIT_INTERVAL` 1 bis 3600, `OPENCHAMBER_PORT` 1 bis 65535,
+`ACTIVITY_NOW_MS` ≤ 9999999999999.
+Die Uhr der Warteschleife ist über `ACTIVITY_DATE_CMD` austauschbar (Default `date +%s`). Jeder Uhrwert wird
+samt Exitstatus geprüft (Ganzzahl ≤ 9999999999); Fehler, leere oder ungültige Werte beenden das Warten als
+Zeitüberschreitung, nie als Erfolg.
 Alle Stellschrauben stehen im Kopf von `lib/activity.sh`.
 
 ### Bekannte Grenzen

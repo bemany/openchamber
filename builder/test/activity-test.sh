@@ -307,11 +307,16 @@ runs_case "runs: anderer Port -> nein" /a/bin/cli.js 1
 PS=false; runs_case "runs: ps-Fehler -> nein" /a/bin/cli.js 1
 
 # === Warteschleife mit gemockter Uhr und Zahlenprüfung ===========================
-# Uhr: Zeile n von $MOCK/clock beim n-ten Aufruf, danach die letzte Zeile
+# Uhr: Zeile n von $MOCK/clock beim n-ten Aufruf (auch leer), nach dem Ende die
+# letzte Zeile; "FAIL" = Exitcode 3 ohne Ausgabe
 cat > "$MOCK/clock" <<'EOF'
 #!/bin/sh
 n=$(( $(cat "$MOCK/clock.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$MOCK/clock.n"
-v=$(sed -n "${n}p" "$MOCK/clock.seq"); [ -n "$v" ] || v=$(tail -n 1 "$MOCK/clock.seq"); echo "$v"
+total=$(wc -l < "$MOCK/clock.seq" | tr -d ' ')
+[ "$n" -le "$total" ] || n=$total
+v=$(sed -n "${n}p" "$MOCK/clock.seq")
+[ "$v" != FAIL ] || exit 3
+echo "$v"
 EOF
 chmod +x "$MOCK/clock"
 clock_seq() { rm -f "$MOCK/clock.n"; printf '%s\n' "$@" > "$MOCK/clock.seq"; }
@@ -342,6 +347,36 @@ lib_case "Warten: Intervall 0 -> ungültig" 1 "ACTIVITY_WAIT_INTERVAL ungültig:
 lib_case "Warten: Timeout negativ -> ungültig" 1 "ACTIVITY_WAIT_TIMEOUT ungültig: '-5'" "$WAIT_ENV; export ACTIVITY_WAIT_TIMEOUT=-5" activity_wait_ignored
 lib_case "Warten: Nachlauf keine Zahl -> ungültig" 1 "ACTIVITY_SETTLE_SECONDS ungültig: '2m'" "$WAIT_ENV; export ACTIVITY_SETTLE_SECONDS=2m" activity_wait_ignored
 lib_case "Warten: Uhr kaputt -> Fehler" 1 "Uhr nicht lesbar" "$WAIT_ENV; export ACTIVITY_DATE_CMD=false" activity_wait_ignored
+# Jeder Uhrwert wird geprüft: gültig, dann Text/leer/Fehlercode -> kein Erfolg
+quiet; ign_db; clock_seq 100 100 100 abc
+lib_case "Uhr: Text an der Erfolgsprüfung -> kein Erfolg" 1 "Uhr nicht lesbar: 'abc'" "$WAIT_ENV" activity_wait_ignored
+quiet; ign_db; clock_seq 100 100 100 ''
+lib_case "Uhr: leer an der Erfolgsprüfung -> kein Erfolg" 1 "Uhr nicht lesbar: ''" "$WAIT_ENV" activity_wait_ignored
+quiet; ign_db; clock_seq 100 100 100 FAIL
+lib_case "Uhr: Fehlercode an der Erfolgsprüfung -> kein Erfolg" 1 "Uhr nicht lesbar: 'Fehlercode 3'" "$WAIT_ENV" activity_wait_ignored
+quiet; ign_db; clock_seq 100 100 100 -5
+lib_case "Uhr: negativ an der Erfolgsprüfung -> kein Erfolg" 1 "Zeitüberschreitung (Uhr)" "$WAIT_ENV" activity_wait_ignored
+quiet; ign_db; clock_seq 100 abc
+lib_case "Uhr: Text am Schleifenanfang -> Zeitüberschreitung" 1 "Zeitüberschreitung (Uhr)" "$WAIT_ENV" activity_wait_ignored
+quiet; ign_db; clock_seq 100 100 FAIL
+lib_case "Uhr: Fehlercode vor dem Nachlauf -> Zeitüberschreitung" 1 "Zeitüberschreitung (Uhr)" "$WAIT_ENV" activity_wait_ignored
+quiet; ign_db; clock_seq 100 100 '1e9'
+lib_case "Uhr: Text vor dem Intervall-Schlaf -> Zeitüberschreitung" 1 "Uhr nicht lesbar: '1e9'" "$WAIT_ENV; export ACTIVITY_LIVE_CMD='echo me'" activity_wait_ignored
+quiet; ign_db; clock_seq FAIL
+lib_case "Uhr: Fehlercode beim Start -> Fehler" 1 "Uhr nicht lesbar" "$WAIT_ENV" activity_wait_ignored
+
+# Obergrenzen gegen 64-Bit-Überlauf
+quiet; ign_db; clock_seq 100
+lib_case "Warten: Timeout > 86400 -> ungültig" 1 "ACTIVITY_WAIT_TIMEOUT ungültig: '86401' (höchstens 86400)" "$WAIT_ENV; export ACTIVITY_WAIT_TIMEOUT=86401" activity_wait_ignored
+lib_case "Warten: Intervall > 3600 -> ungültig" 1 "(höchstens 3600)" "$WAIT_ENV; export ACTIVITY_WAIT_INTERVAL=3601" activity_wait_ignored
+quiet; new_db
+lib_case "Check: ALLOW_STALE_HOURS=3000000000000 -> blockiert" 1 "BLOCK  ALLOW_STALE_HOURS ungültig: '3000000000000' (höchstens 8760)" "export ACTIVITY_LIVE_CMD=false ALLOW_STALE_HOURS=3000000000000" activity_check
+lib_case "Check: ALLOW_STALE_HOURS=8760 -> Override greift" 0 "ALLOW_STALE_HOURS=8760" "export ACTIVITY_LIVE_CMD=false ALLOW_STALE_HOURS=8760" activity_check
+lib_case "Check: ACTIVITY_RECENT_SECONDS > 86400 -> blockiert" 1 "(höchstens 86400)" "export ACTIVITY_RECENT_SECONDS=999999999999999" activity_check
+lib_case "Check: ACTIVITY_NOW_MS zu groß -> blockiert" 1 "ACTIVITY_NOW_MS ungültig: '99999999999999' (höchstens 9999999999999)" "export ACTIVITY_NOW_MS=99999999999999" activity_check
+lib_case "Check: OPENCHAMBER_PORT 0 -> blockiert" 1 "OPENCHAMBER_PORT ungültig: '0' (mindestens 1)" "export OPENCHAMBER_PORT=0" activity_check
+lib_case "Check: OPENCHAMBER_PORT 70000 -> blockiert" 1 "(höchstens 65535)" "export OPENCHAMBER_PORT=70000" activity_check
+
 quiet; new_db
 lib_case "Check: ACTIVITY_RECENT_SECONDS keine Zahl -> blockiert" 1 "BLOCK  ACTIVITY_RECENT_SECONDS ungültig: 'abc'" "export ACTIVITY_RECENT_SECONDS=abc" activity_check
 lib_case "Check: ACTIVITY_RECENT_SECONDS führende Null -> blockiert" 1 "ACTIVITY_RECENT_SECONDS ungültig: '08'" "export ACTIVITY_RECENT_SECONDS=08" activity_check
