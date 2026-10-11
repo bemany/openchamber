@@ -140,7 +140,9 @@ its `cycle_agent` meaning, and Shift+Tab always does.
 Taking a suggestion (Tab, a chip, the row) replaces the text as one undo step
 of its own (`replaceAllAsOwnStep` in `editor/documentEdits.ts`), so typing
 right after it undoes separately. Taking and dismissing both use up the
-payload, locally to this composer and keyed by session and payload
+payload; taking does so on every layout, so a row or chip taken on a touch
+layout is not offered again as ghost text after a switch to a keyboard
+layout. Both act locally in this composer, keyed by session and payload
 (`forMessageID` + `generatedAt`): clearing the text does not bring the ghost
 text back, a new payload does, and the metadata is untouched. One entry is
 kept per session, at most 50 sessions.
