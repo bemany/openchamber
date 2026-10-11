@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+    ghostTextDismissalsAfter,
     ghostTextKeyAction,
     visibleGhostText,
     withGhostTextDismissed,
@@ -74,6 +75,32 @@ describe('used-up payloads', () => {
     test('dismissing the same payload twice keeps the same state', () => {
         const dismissals = withGhostTextDismissed(NONE, 'ses_a', 'msg_1:100');
         expect(withGhostTextDismissed(dismissals, 'ses_a', 'msg_1:100')).toBe(dismissals);
+    });
+});
+
+describe('acting on a payload', () => {
+    const act = (kind: 'taken' | 'edited', ghostVisible: boolean, dismissals = NONE) =>
+        ghostTextDismissalsAfter(dismissals, { kind, sessionId: 'ses_a', payloadKey: 'msg_1:100', ghostVisible });
+
+    test('taking it on a touch layout uses it up for a later keyboard layout too', () => {
+        // On a phone or touch tablet no ghost text shows; the row or a chip is taken.
+        const dismissals = act('taken', false);
+        expect(visibleGhostText(input({ hasKeyboardLayout: true, composerText: '', dismissals }))).toBeNull();
+    });
+
+    test('typing without visible ghost text leaves the payload for later', () => {
+        const dismissals = act('edited', false);
+        expect(dismissals).toBe(NONE);
+        expect(visibleGhostText(input({ dismissals }))).toBe('Run the tests');
+    });
+
+    test('typing over visible ghost text uses it up', () => {
+        expect(visibleGhostText(input({ dismissals: act('edited', true) }))).toBeNull();
+    });
+
+    test('nothing to use up without a session or payload', () => {
+        expect(ghostTextDismissalsAfter(NONE, { kind: 'taken', sessionId: null, payloadKey: 'msg_1:100', ghostVisible: false })).toBe(NONE);
+        expect(ghostTextDismissalsAfter(NONE, { kind: 'taken', sessionId: 'ses_a', payloadKey: '', ghostVisible: false })).toBe(NONE);
     });
 });
 

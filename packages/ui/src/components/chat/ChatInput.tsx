@@ -61,7 +61,7 @@ import { ModelControls } from './ModelControls';
 import { parseAgentMentions } from '@/lib/messages/agentMentions';
 import { CONTEXT_METADATA_KEY, draftFromContextPayload } from '@/lib/messages/contextParts';
 import { shouldSubmitEnter } from './composer/keyboardPolicy';
-import { ghostTextKeyAction, visibleGhostText, withGhostTextDismissed, type GhostTextDismissals } from './composer/state/ghostText';
+import { ghostTextDismissalsAfter, ghostTextKeyAction, visibleGhostText, type GhostTextDismissals } from './composer/state/ghostText';
 import { getDropdownNavigationKey } from '@/components/ui/dropdown-navigation';
 import { useChatColumnActions, useChatColumnExpandedInput, useChatColumnSession, type ChatColumnSession } from './chatColumnSession';
 import { usePinnedComposerSelection } from './pinnedComposerSelection';
@@ -2340,10 +2340,17 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         dismissals: ghostTextDismissals,
     });
     const ghostTextAcceptKey = formatShortcutForDisplay('tab');
-    // Uses up the payload while its ghost text shows; otherwise a no-op.
+    // Typing, pasting or Escape retire the payload only while its ghost text
+    // shows; taking the suggestion always uses it up (`ghostTextDismissalsAfter`).
     const dismissGhostText = React.useCallback(() => {
-        if (!ghostTextValue || !currentSessionId) return;
-        setGhostTextDismissals((current) => withGhostTextDismissed(current, currentSessionId, ghostPayloadKey));
+        setGhostTextDismissals((current) => ghostTextDismissalsAfter(current, {
+            kind: 'edited', sessionId: currentSessionId, payloadKey: ghostPayloadKey, ghostVisible: ghostTextValue !== null,
+        }));
+    }, [currentSessionId, ghostPayloadKey, ghostTextValue]);
+    const consumeAssistPayload = React.useCallback(() => {
+        setGhostTextDismissals((current) => ghostTextDismissalsAfter(current, {
+            kind: 'taken', sessionId: currentSessionId, payloadKey: ghostPayloadKey, ghostVisible: ghostTextValue !== null,
+        }));
     }, [currentSessionId, ghostPayloadKey, ghostTextValue]);
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -3735,7 +3742,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     // suggestion uses up its payload, so clearing the text does not bring the
     // ghost text back, and it is one undo step of its own.
     const applyAssistSuggestion = React.useCallback((text: string) => {
-        dismissGhostText();
+        consumeAssistPayload();
         const editor = composerRef.current;
         if (editor) editor.replaceAll(text);
         else setMessage(text);
@@ -3744,7 +3751,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         } else {
             requestAnimationFrame(() => composerRef.current?.focus());
         }
-    }, [dismissGhostText, isMobile, mobileComposerExpanded, mobileShell]);
+    }, [consumeAssistPayload, isMobile, mobileComposerExpanded, mobileShell]);
 
     // Linked references render as chips beside the attached files, inside the
     // composer box and inside the mobile pill.

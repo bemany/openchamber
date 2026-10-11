@@ -33,6 +33,21 @@ export const visibleGhostText = (input: GhostTextInput): string | null => {
     return input.candidate;
 };
 
+/**
+ * The dismissals after the user acted on the session's current payload.
+ * Taking the suggestion (Tab, a chip, the row) always uses it up, on every
+ * layout, so a later switch to a keyboard layout does not offer it again.
+ * Typing, pasting or Escape only retire ghost text that is actually showing.
+ */
+export const ghostTextDismissalsAfter = (
+    dismissals: GhostTextDismissals,
+    action: { kind: 'taken' | 'edited'; sessionId: string | null; payloadKey: string; ghostVisible: boolean },
+): GhostTextDismissals => {
+    if (!action.sessionId || !action.payloadKey) return dismissals;
+    if (action.kind === 'edited' && !action.ghostVisible) return dismissals;
+    return withGhostTextDismissed(dismissals, action.sessionId, action.payloadKey);
+};
+
 /** The dismissals with this payload used up; clearing the composer does not bring it back. */
 export const withGhostTextDismissed = (
     dismissals: GhostTextDismissals,
