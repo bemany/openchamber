@@ -3,102 +3,160 @@
 #
 #   activity_check          # listet Blockierendes, Rückgabe 0 = ruhig, 1 = aktiv
 #
-# Regel (Esref-Vorgabe 11.10.2026), drei Bedingungen, jede blockiert:
-#  1. Sessions (inkl. Kind-Sessions) aus session_message, deren letzter Eintrag
-#     nach seq kein `idle` ist. `*-switched`-Einträge (agent/model/location)
-#     zählen nicht, sie werden oft nach dem idle angehängt.
-#     - Live-Status abfragbar (GET /api/session/active der laufenden OpenCode-
-#       Instanz): aktiv ist, was dort gelistet ist. DB-Kandidaten, die dort
-#       fehlen, sind abgebrochene Züge (kein idle geschrieben) und werden nur
-#       gelistet. Live laufende Sessions ohne DB-Kandidat blockieren auch.
-#     - Live-Status nicht abfragbar: DB-Kandidaten mit letztem Eintrag jünger
-#       als STALE_HOURS blockieren, ältere gelten als "vermutlich abgebrochen".
-#  2. Laufende Prozesse aus ACTIVITY_PROCESS_PATTERNS (xcodebuild, simctl, …),
-#     die minutenlang nichts in die DB schreiben.
+# Fail-closed: Was nicht sicher als ruhig erkannt wird, blockiert. Jede Bedingung
+# blockiert für sich (Details und Grenzen in builder/README.md):
+#  1. Sessions (inkl. Kind- und archivierter Sessions) aus session_message, deren
+#     letzter Eintrag nach seq kein `idle` ist; `*-switched`-Einträge zählen nicht.
+#     Der Live-Status der von OpenChamber verwalteten OpenCode-Instanz
+#     (GET /api/session/active) entscheidet: dort gelistet = aktiv, nicht
+#     gelistet = vermutlich abgebrochen, ignoriert. Live laufende Sessions ohne
+#     DB-Kandidat blockieren auch. Live-Status nicht verfügbar = blockiert
+#     (außer ALLOW_STALE_HOURS=N: dann blockieren nur Kandidaten jünger als N h).
+#  2. Laufende Prozesse aus ACTIVITY_PROCESS_PATTERNS (xcodebuild, simctl, …).
+#     Prozessliste nicht lesbar = blockiert.
 #  3. Sessions, deren session_v2.time_updated jünger als ACTIVITY_RECENT_SECONDS ist.
+#  DB nicht lesbar (fehlt, gesperrt) = blockiert.
 #
 # Überschreibbar (v. a. für Tests):
 #   ACTIVITY_DB                Pfad zur OpenCode-DB (nur -readonly geöffnet)
-#   STALE_HOURS                Default 6
+#   ALLOW_STALE_HOURS          Ausdrücklicher Override bei fehlendem Live-Status (leer = aus)
 #   ACTIVITY_RECENT_SECONDS    Default 120
 #   ACTIVITY_NOW_MS            Jetzt in ms (Default: date)
-#   ACTIVITY_LIVE_CMD          Befehl, der laufende Session-IDs zeilenweise ausgibt;
-#                              Exit != 0 = Live-Status nicht abfragbar
-#   ACTIVITY_LIVE=0            Live-Status gar nicht abfragen
-#   ACTIVITY_PS_CMD            Default "ps -axo pid=,args="
-#   ACTIVITY_PROCESS_PATTERNS  Basename des Programms, "prog:arg1" verlangt
-#                              zusätzlich dieses erste Argument
-#   ACTIVITY_PROCESS_IGNORE    awk-Regex auf die ganze Befehlszeile, Treffer zählen
-#                              nicht (Default: "simctl list", das serve-sim alle
-#                              paar Sekunden nur lesend aufruft)
+#   ACTIVITY_PS_CMD            Default "ps -axo pid=,ppid=,args=" (Spalten pid ppid args)
+#   ACTIVITY_ENV_CMD           Gibt Befehlszeile samt Umgebung eines Prozesses aus,
+#                              PID wird angehängt. Default "ps eww -o command= -p"
+#   ACTIVITY_CURL              Default "curl"
+#   ACTIVITY_LIVE_CMD          Ersetzt die Live-Abfrage ganz: gibt laufende Session-IDs
+#                              zeilenweise aus, Exit != 0 = nicht verfügbar
+#   OPENCHAMBER_PORT           Port des OpenChamber-Prozesses (`cli.js serve`), Default 3000
+#   ACTIVITY_PROCESS_PATTERNS  Programmnamen; "prog:arg" verlangt zusätzlich ein
+#                              späteres Argument arg (z. B. xcrun … simctl)
+#   ACTIVITY_PROCESS_IGNORE    awk-Regex auf die Befehlszeile, Treffer zählen nicht
+#                              (Default: "simctl list", das serve-sim nur lesend pollt)
 #   ACTIVITY_TAG               Präfix der Ausgabezeilen
 
 ACTIVITY_DB="${ACTIVITY_DB:-$HOME/.local/share/opencode/opencode.db}"
-STALE_HOURS="${STALE_HOURS:-6}"
+ALLOW_STALE_HOURS="${ALLOW_STALE_HOURS:-}"
 ACTIVITY_RECENT_SECONDS="${ACTIVITY_RECENT_SECONDS:-120}"
-ACTIVITY_PS_CMD="${ACTIVITY_PS_CMD:-ps -axo pid=,args=}"
+ACTIVITY_PS_CMD="${ACTIVITY_PS_CMD:-ps -axo pid=,ppid=,args=}"
+ACTIVITY_ENV_CMD="${ACTIVITY_ENV_CMD:-ps eww -o command= -p}"
+ACTIVITY_CURL="${ACTIVITY_CURL:-curl}"
+OPENCHAMBER_PORT="${OPENCHAMBER_PORT:-3000}"
 # Nicht die CoreSimulator-Daemons (CoreSimulatorService, simdiskimaged,
 # launchd_sim, …): die laufen bei gebootetem Simulator immer.
 ACTIVITY_PROCESS_PATTERNS="${ACTIVITY_PROCESS_PATTERNS:-xcodebuild xcrun:simctl simctl xctest}"
-ACTIVITY_PROCESS_IGNORE="${ACTIVITY_PROCESS_IGNORE:-/simctl list( |$)}"
+ACTIVITY_PROCESS_IGNORE="${ACTIVITY_PROCESS_IGNORE-(^|[ /])simctl list( |\$)}"
 ACTIVITY_TAG="${ACTIVITY_TAG:-[activity]}"
 
 activity_say() { echo "$ACTIVITY_TAG $*"; }
 
-# Laufende Session-IDs der OpenCode-Instanzen (`opencode serve … --port N`).
-# Das Passwort steht in der Prozessumgebung (OPENCODE_SERVER_PASSWORD, von
-# OpenChamber gesetzt); es geht nur per stdin an curl und wird nie ausgegeben.
+# Wert einer Option aus einer Befehlszeile ("--name N" oder "--name=N")
+activity_opt() {
+  printf '%s\n' "$1" | awk -v o="--$2" '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == o && i < NF) { print $(i + 1); exit }
+      if (index($i, o "=") == 1) { print substr($i, length(o) + 2); exit }
+    }
+  }'
+}
+
+# Laufende Session-IDs der von OpenChamber verwalteten OpenCode-Instanz.
+# $1 = Prozessliste (pid ppid args). Bei jedem Fehler: Grund auf stdout, Exit 1.
+# Das Passwort (OPENCODE_SERVER_PASSWORD aus der Prozessumgebung) geht nur per
+# stdin als curl-Konfiguration an curl, nie in argv, Ausgabe oder Dateien.
 activity_live_default() {
-  _pids=$(ps -axo pid=,args= | awk '{ n = split($2, a, "/"); if (a[n] == "opencode" && $3 == "serve") print $1 }')
-  [ -n "$_pids" ] || return 1
-  for _pid in $_pids; do
-    _args=$(ps -o args= -p "$_pid") || return 1
-    _port=$(echo "$_args" | awk '{ for (i = 1; i < NF; i++) if ($i == "--port") print $(i + 1) }')
-    _host=$(echo "$_args" | awk '{ for (i = 1; i < NF; i++) if ($i == "--hostname") print $(i + 1) }')
-    [ -n "$_port" ] || return 1
-    _json=$(
-      ps eww -o command= -p "$_pid" | tr ' ' '\n' | sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' | head -n 1 |
-        awk 'NF { printf "user = \"opencode:%s\"\n", $0 }' |
-        curl -sf -m 3 -K - -H 'Accept: application/json' "http://${_host:-127.0.0.1}:$_port/api/session/active"
-    ) || return 1
-    _json=$(printf '%s' "$_json" | sed "s/'/''/g")
-    # Ohne Objekt unter .data ist die Antwort unbrauchbar, nicht "nichts läuft".
-    [ "$(sqlite3 :memory: "select json_type('$_json', '\$.data')" 2>/dev/null)" = object ] || return 1
-    sqlite3 :memory: "select key from json_each('$_json', '\$.data')" || return 1
-  done
+  _ps=$1
+  [ -n "$_ps" ] || { echo "keine Prozessliste"; return 1; }
+
+  # Genau ein OpenChamber-Prozess "… cli.js serve … --port $OPENCHAMBER_PORT"
+  _oc=$(printf '%s\n' "$_ps" | awk -v want="$OPENCHAMBER_PORT" '{
+    port = ""; srv = 0
+    for (i = 3; i <= NF; i++) {
+      if ($i ~ /(^|\/)cli\.js$/ && $(i + 1) == "serve") srv = 1
+      if ($i == "--port" && i < NF) port = $(i + 1)
+      else if (index($i, "--port=") == 1) port = substr($i, 8)
+    }
+    if (srv && port == want) print $1
+  }')
+  _n=$(printf '%s' "$_oc" | grep -c .)
+  [ "$_n" = 1 ] || { echo "OpenChamber auf Port $OPENCHAMBER_PORT nicht eindeutig gefunden ($_n Prozesse)"; return 1; }
+
+  # Genau ein Kindprozess "opencode serve"
+  _line=$(printf '%s\n' "$_ps" | awk -v parent="$_oc" '$2 == parent { n = split($3, a, "/"); if (a[n] == "opencode" && $4 == "serve") print }')
+  _n=$(printf '%s' "$_line" | grep -c .)
+  [ "$_n" = 1 ] || { echo "verwaltete OpenCode-Instanz (Kind von PID $_oc) nicht eindeutig gefunden ($_n Prozesse)"; return 1; }
+  _pid=$(printf '%s\n' "$_line" | awk '{ print $1 }')
+  _port=$(activity_opt "$_line" port)
+  _host=$(activity_opt "$_line" hostname)
+  case "$_port" in '' | *[!0-9]*) echo "Port der OpenCode-Instanz (PID $_pid) nicht lesbar"; return 1 ;; esac
+  case "$_host" in '' | 0.0.0.0) _host=127.0.0.1 ;; *[!A-Za-z0-9.-]*) echo "Host '$_host' nicht unterstützt"; return 1 ;; esac
+
+  _pw=$(eval "$ACTIVITY_ENV_CMD \"\$_pid\"" 2>/dev/null | tr ' ' '\n' | sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' | head -n 1)
+  # curl-Konfiguration: Wert in Anführungszeichen, \ und " escapen
+  _pw=$(printf '%s' "$_pw" | sed 's/[\\"]/\\&/g')
+  _resp=$(
+    { [ -z "$_pw" ] || printf 'user = "opencode:%s"\n' "$_pw"; } |
+      $ACTIVITY_CURL -sS -m 3 -K - -H 'Accept: application/json' -w '\n%{http_code}' \
+        "http://$_host:$_port/api/session/active" 2>&1
+  ) || { echo "Abfrage $_host:$_port fehlgeschlagen: $(printf '%s\n' "$_resp" | tail -n 1 | cut -c1-120)"; return 1; }
+  _pw=
+  _code=$(printf '%s\n' "$_resp" | tail -n 1)
+  [ "$_code" = 200 ] || { echo "Abfrage $_host:$_port: HTTP $_code$( [ "$_code" = 401 ] && echo ' (Passwort fehlt oder falsch)')"; return 1; }
+
+  # Erwartet {"data": {"<id>": {…}, …}}; alles andere ist kein "nichts läuft"
+  _body=$(printf '%s\n' "$_resp" | sed '$d' | sed "s/'/''/g")
+  _ok=$(sqlite3 :memory: "select case when json_valid(x) then
+      (case when json_type(x, '\$.data') = 'object'
+            and (select count(*) from json_each(x, '\$.data') where type <> 'object') = 0
+       then 1 else 0 end) else 0 end from (select '$_body' as x)" 2>/dev/null)
+  [ "$_ok" = 1 ] || { echo "Antwort von $_host:$_port hat nicht die Form {\"data\":{…}}"; return 1; }
+  sqlite3 :memory: "select key from json_each('$_body', '\$.data')" || { echo "Antwort nicht auswertbar"; return 1; }
 }
 
 activity_live() {
-  [ "${ACTIVITY_LIVE:-1}" = 0 ] && return 1
   if [ -n "${ACTIVITY_LIVE_CMD:-}" ]; then
     eval "$ACTIVITY_LIVE_CMD"
   else
-    activity_live_default
+    activity_live_default "$1"
   fi
 }
 
-# Zeilen "pid args" der laufenden Build-/Simulator-Befehle
+# Zeilen "pid args" der laufenden Build-/Simulator-Befehle. $1 = Prozessliste.
+# Ein Programm zählt, wenn die Befehlszeile mit "prog" oder "<pfad>/prog" beginnt
+# (der Pfad darf Leerzeichen enthalten).
 activity_processes() {
-  eval "$ACTIVITY_PS_CMD" | sed 's/^ *//' | awk -v pats="$ACTIVITY_PROCESS_PATTERNS" -v ign="$ACTIVITY_PROCESS_IGNORE" '
+  printf '%s\n' "$1" | awk -v pats="$ACTIVITY_PROCESS_PATTERNS" -v ign="$ACTIVITY_PROCESS_IGNORE" '
     BEGIN { np = split(pats, p, " ") }
-    ign != "" && $0 ~ ign { next }
+    NF < 3 { next }
     {
-      n = split($2, a, "/"); prog = a[n]
+      args = $0; sub(/^ *[^ ]+ +[^ ]+ +/, "", args)
+      if (ign != "" && args ~ ign) next
       for (i = 1; i <= np; i++) {
         split(p[i], q, ":")
-        if (prog == q[1] && (q[2] == "" || $3 == q[2])) { print substr($0, 1, 160); break }
+        re = "^(/.*/)?" q[1] "( |$)"
+        if (q[2] != "") re = "^(/.*/)?" q[1] " (.* )?" q[2] "( |$)"
+        if (args ~ re) { print $1 " " substr(args, 1, 150); break }
       }
     }'
 }
 
 activity_check() {
   _now=${ACTIVITY_NOW_MS:-$(($(date +%s) * 1000))}
-  _stale_ms=$((STALE_HOURS * 3600000))
   _recent_ms=$((ACTIVITY_RECENT_SECONDS * 1000))
   _tab=$(printf '\t')
-  _blocked=0
+  _out=
+
+  activity_add() { _out="$_out$1
+"; }
+
+  # Prozessliste einmal erfassen, Exitcode prüfen, dann erst filtern
+  _psok=1
+  _ps=$(eval "$ACTIVITY_PS_CMD") || _psok=0
+  [ -n "$_ps" ] || _psok=0
+  [ $_psok = 1 ] || activity_add "BLOCK  Prozessliste nicht lesbar ($ACTIVITY_PS_CMD)"
 
   # 1. DB-Kandidaten: id, Titel, Typ, Zeit, Parent, Alter in ms
+  _dbok=1
   _cand=$(sqlite3 -readonly -separator "$_tab" "$ACTIVITY_DB" "
     with last as (
       select session_id, type, time_updated,
@@ -112,21 +170,33 @@ activity_check() {
            $_now - l.time_updated
     from last l join session_v2 s on s.id = l.session_id
     where l.rn = 1 and l.type != 'idle'
-    order by l.time_updated desc") || {
-    activity_say "DB nicht lesbar: $ACTIVITY_DB (gilt als aktiv)"
-    return 1
+    order by l.time_updated desc" 2>&1) || {
+    _dbok=0
+    activity_add "BLOCK  DB nicht lesbar: $ACTIVITY_DB ($(printf '%s' "$_cand" | head -n 1 | cut -c1-100))"
+    _cand=
   }
 
-  if _live=$(activity_live); then
-    activity_say "Live-Status: abgefragt ($(printf '%s\n' "$_live" | grep -c .) laufend)"
+  _stale_ms=
+  if _live=$(activity_live "$_ps"); then
     _mode=live
+    activity_add "INFO   Live-Status: abgefragt ($(printf '%s' "$_live" | grep -c .) laufend)"
   else
-    activity_say "Live-Status: nicht abfragbar, Altersregel (STALE_HOURS=$STALE_HOURS)"
-    _mode=age
+    _reason=$(printf '%s' "$_live" | tail -n 1)
     _live=
+    case "$ALLOW_STALE_HOURS" in
+      '' | *[!0-9]*)
+        _mode=none
+        activity_add "BLOCK  Live-Status nicht verfügbar: ${_reason:-unbekannt} (FORCE=1 oder ALLOW_STALE_HOURS=N)"
+        ;;
+      *)
+        _mode=age
+        _stale_ms=$((ALLOW_STALE_HOURS * 3600000))
+        activity_add "WARN   Live-Status nicht verfügbar: ${_reason:-unbekannt}; ALLOW_STALE_HOURS=$ALLOW_STALE_HOURS"
+        ;;
+    esac
   fi
 
-  _report=$(printf '%s\n' "$_cand" | awk -F "$_tab" -v mode="$_mode" -v stale="$_stale_ms" -v live="$(printf '%s' "$_live" | tr '\n' ' ')" '
+  _rep=$(printf '%s\n' "$_cand" | awk -F "$_tab" -v mode="$_mode" -v stale="$_stale_ms" -v live="$(printf '%s' "$_live" | tr '\n' ' ')" '
     BEGIN { n = split(live, ids, " "); for (i = 1; i <= n; i++) if (ids[i] != "") running[ids[i]] = 1 }
     NF >= 6 {
       seen[$1] = 1
@@ -134,34 +204,36 @@ activity_check() {
       if (mode == "live") {
         if ($1 in running) print "BLOCK  Session " line " (live: läuft)"
         else print "IGNORE Session " line " (live: nicht laufend, vermutlich abgebrochen)"
-      } else {
-        if ($6 < stale) print "BLOCK  Session " line
-        else print "IGNORE Session " line " (älter als " stale / 3600000 " h, vermutlich abgebrochen)"
-      }
+      } else if (mode == "age") {
+        if ($6 < stale) print "BLOCK  Session " line " (jünger als " stale / 3600000 " h)"
+        else print "IGNORE Session " line " (älter als " stale / 3600000 " h, per ALLOW_STALE_HOURS ignoriert)"
+      } else print "BLOCK  Session " line " (Live-Status unbekannt)"
     }
     END { for (id in running) if (!(id in seen)) print "BLOCK  Session " id " (live: läuft, DB-Eintrag idle oder unbekannt)" }')
+  [ -z "$_rep" ] || activity_add "$_rep"
 
   # 2. Prozesse
-  _procs=$(activity_processes | sed 's/^/BLOCK  Prozess /')
+  if [ $_psok = 1 ]; then
+    _procs=$(activity_processes "$_ps" | sed 's/^/BLOCK  Prozess /')
+    [ -z "$_procs" ] || activity_add "$_procs"
+  fi
 
   # 3. Sessions, die in den letzten ACTIVITY_RECENT_SECONDS geändert wurden
-  _recent=$(sqlite3 -readonly -separator "$_tab" "$ACTIVITY_DB" "
-    select id, substr(replace(replace(coalesce(title, ''), char(9), ' '), char(10), ' '), 1, 50),
-           datetime(time_updated / 1000, 'unixepoch', 'localtime')
-    from session_v2 where time_updated > $_now - $_recent_ms order by time_updated desc") || {
-    activity_say "DB nicht lesbar: $ACTIVITY_DB (gilt als aktiv)"
-    return 1
-  }
-  _recent=$(printf '%s\n' "$_recent" | awk -F "$_tab" -v s="$ACTIVITY_RECENT_SECONDS" \
-    'NF >= 3 { printf "BLOCK  Kürzlich %s  \"%s\"  geändert %s (< %s s)\n", $1, $2, $3, s }')
+  if [ $_dbok = 1 ]; then
+    if _recent=$(sqlite3 -readonly -separator "$_tab" "$ACTIVITY_DB" "
+      select id, substr(replace(replace(coalesce(title, ''), char(9), ' '), char(10), ' '), 1, 50),
+             datetime(time_updated / 1000, 'unixepoch', 'localtime')
+      from session_v2 where time_updated > $_now - $_recent_ms order by time_updated desc" 2>&1); then
+      _recent=$(printf '%s\n' "$_recent" | awk -F "$_tab" -v s="$ACTIVITY_RECENT_SECONDS" \
+        'NF >= 3 { printf "BLOCK  Kürzlich %s  \"%s\"  geändert %s (< %s s)\n", $1, $2, $3, s }')
+      [ -z "$_recent" ] || activity_add "$_recent"
+    else
+      activity_add "BLOCK  DB nicht lesbar: $ACTIVITY_DB ($(printf '%s' "$_recent" | head -n 1 | cut -c1-100))"
+    fi
+  fi
 
-  for _part in "$_report" "$_procs" "$_recent"; do
-    [ -n "$_part" ] || continue
-    printf '%s\n' "$_part" | while IFS= read -r _l; do activity_say "$_l"; done
-    printf '%s\n' "$_part" | grep -q '^BLOCK' && _blocked=1
-  done
-
-  if [ "$_blocked" = 1 ]; then
+  printf '%s' "$_out" | while IFS= read -r _l; do activity_say "$_l"; done
+  if printf '%s' "$_out" | grep -q '^BLOCK'; then
     activity_say "Ergebnis: AKTIV (Neustart würde obige Züge/Prozesse abbrechen)"
     return 1
   fi

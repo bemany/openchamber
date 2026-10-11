@@ -10,18 +10,21 @@
 #
 # ACHTUNG: Der Neustart beendet auch die von OpenChamber gestartete OpenCode-
 # Instanz. Laufende Agent-Züge brechen ab, auch der Zug, der dieses Skript
-# eventuell aufruft. Deshalb laufen Neustart und Prüfung abgekoppelt per nohup
-# (Phase --restart) und schreiben nach $LOG.
+# eventuell aufruft. Deshalb laufen zweite Aktivitätsprüfung, Umschreiben des
+# Startskripts, Neustart und Prüfung abgekoppelt per nohup (interne Phase
+# --restart, nur mit Token) und schreiben nach $LOG.
 set -eu
 
-RELEASE="$HOME/Projects/openchamber-release"
+RELEASE="${SWITCH_RELEASE:-$HOME/Projects/openchamber-release}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-d9dfc650946dad34a089ce901a76360bfbe30590}"
 FORK_CLI="$RELEASE/packages/web/bin/cli.js"
-NPM_CLI="$HOME/.bun/install/global/node_modules/@openchamber/web/bin/cli.js"
-START="$HOME/.config/openchamber/bin/OpenChamber"
+NPM_CLI="${SWITCH_NPM_CLI:-$HOME/.bun/install/global/node_modules/@openchamber/web/bin/cli.js}"
+START="${SWITCH_START:-$HOME/.config/openchamber/bin/OpenChamber}"
 BACKUP="$START.npm-2.2.0.bak"
 SERVICE="gui/$(id -u)/dev.openchamber.web"
-ERRLOG="$HOME/Library/Logs/OpenChamber/startup.err.log"
+ERRLOG="${SWITCH_ERRLOG:-$HOME/Library/Logs/OpenChamber/startup.err.log}"
+LAUNCHCTL="${SWITCH_LAUNCHCTL:-launchctl}"
+CURL="${SWITCH_CURL:-curl}"
 # Verzeichnis des Skripts (auch über Symlink aufgerufen), für lib/activity.sh
 SELF="$0"
 while [ -L "$SELF" ]; do
@@ -35,34 +38,62 @@ die() { echo "[switch-to-fork] FEHLER: $*" >&2; exit 1; }
 # Läuft "<…>/node <cli> serve …"? (pgrep sieht den LaunchAgent-Prozess nicht zuverlässig)
 runs() { ps -axo args= | awk -v p="$1" '$1 ~ /\/node$/ && $2 == p && $3 == "serve" {f=1} END {exit !f}'; }
 
-# Phase 2 (abgekoppelt): Neustart und Prüfung
+ACTIVITY_TAG="[switch-to-fork]"
+. "$BUILDER_DIR/lib/activity.sh"
+
+# Nur prüfen: vor jedem anderen Zweig, endet immer ohne Seiteneffekte (Exit 1 = aktiv)
+for a in "$@"; do case "$a" in --check) CHECK_ONLY=1 ;; esac; done
+if [ "${CHECK_ONLY:-0}" = "1" ]; then
+  if activity_check; then exit 0; fi
+  exit 1
+fi
+
+# Startskript auf den Fork umschreiben (nur der cli.js-Pfad), atomar per mv
+rewrite_start() {
+  if grep -qF "$FORK_CLI" "$START"; then
+    say "Startskript zeigt schon auf den Fork"
+    return 0
+  fi
+  TMP="$START.tmp.$$"
+  sed "s|$NPM_CLI|$FORK_CLI|" "$START" > "$TMP"
+  grep -qF "$FORK_CLI" "$TMP" || { rm -f "$TMP"; die "Pfadersetzung fehlgeschlagen"; }
+  chmod 700 "$TMP"
+  mv "$TMP" "$START"
+  say "Startskript umgestellt"
+}
+
+# Interne Phase (abgekoppelt): zweite Prüfung, Umschreiben, Neustart, Prüfung.
+# Nur erreichbar mit dem Token, das Phase 1 beim nohup-Aufruf setzt.
 if [ "${1:-}" = "--restart" ]; then
+  [ -n "${SWITCH_RESTART_TOKEN:-}" ] && [ "${SWITCH_RESTART_TOKEN}" = "${3:-}" ] ||
+    die "--restart ist eine interne Phase und nicht direkt aufrufbar"
   ERR_LINES="${2:-0}"
+  echo "Zweite Aktivitätsprüfung $(date)"
+  if ! activity_check; then
+    if [ "${FORCE:-0}" = "1" ]; then
+      say "FORCE=1: Aktivität ignoriert"
+    else
+      die "Aktivität seit der ersten Prüfung: kein Neustart, Startskript unverändert. Später erneut oder FORCE=1."
+    fi
+  fi
+  rewrite_start
   echo "Neustart $(date)"
-  launchctl kickstart -k "$SERVICE"
+  $LAUNCHCTL kickstart -k "$SERVICE"
   ok=0; i=0
   while [ $i -lt 60 ]; do
     i=$((i + 1))
-    if [ "$(curl -s -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:3000/health)" = 200 ]; then ok=1; break; fi
+    if [ "$($CURL -s -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:3000/health)" = 200 ]; then ok=1; break; fi
     sleep 1
   done
   if [ $ok = 1 ]; then echo "OK: /health 200 nach ${i}s"; else echo "FEHLER: /health nach 60s nicht erreichbar"; fi
-  echo "Root /: HTTP $(curl -s -o /dev/null -m 3 -w '%{http_code}' http://127.0.0.1:3000/)"
+  echo "Root /: HTTP $($CURL -s -o /dev/null -m 3 -w '%{http_code}' http://127.0.0.1:3000/)"
   if runs "$FORK_CLI"; then echo "OK: Fork-Prozess läuft"; else echo "FEHLER: Fork-Prozess nicht gefunden"; fi
   echo "--- neue Zeilen in startup.err.log:"
   tail -n +$((ERR_LINES + 1)) "$ERRLOG" 2>/dev/null | cut -c1-200 | tail -40
   echo "--- Ende"
   exit 0
 fi
-
-ACTIVITY_TAG="[switch-to-fork]"
-. "$BUILDER_DIR/lib/activity.sh"
-
-# Nur prüfen: meldet die Aktivität und endet (Exit 1 = aktiv), ändert nichts
-if [ "${1:-}" = "--check" ] || [ "${CHECK_ONLY:-0}" = "1" ]; then
-  if activity_check; then exit 0; fi
-  exit 1
-fi
+[ $# -eq 0 ] || die "Unbekanntes Argument: $1"
 
 # 1. Release-Worktree prüfen
 [ -f "$FORK_CLI" ] || die "$FORK_CLI fehlt"
@@ -90,26 +121,17 @@ else
   say "Sicherung vorhanden: $BACKUP"
 fi
 
-# 4. Startskript umschreiben (nur der cli.js-Pfad; Node, Port, Host bleiben), atomar per mv
-if grep -qF "$FORK_CLI" "$START"; then
-  say "Startskript zeigt schon auf den Fork"
-else
-  TMP="$START.tmp.$$"
-  sed "s|$NPM_CLI|$FORK_CLI|" "$START" > "$TMP"
-  grep -qF "$FORK_CLI" "$TMP" || { rm -f "$TMP"; die "Pfadersetzung fehlgeschlagen"; }
-  chmod 700 "$TMP"
-  mv "$TMP" "$START"
-  say "Startskript umgestellt"
-fi
-
-# 5. Läuft der Fork schon? Dann kein Neustart.
+# 4. Läuft der Fork schon? Dann nur das Startskript angleichen, kein Neustart.
 if runs "$FORK_CLI"; then
+  rewrite_start
   say "Fork läuft bereits, kein Neustart nötig"
   exit 0
 fi
 
-# 6. Neustart + Prüfung abgekoppelt (überlebt den Abbruch des aufrufenden Zugs)
+# 5. Zweite Prüfung, Umschreiben, Neustart + Prüfung abgekoppelt (überlebt den
+#    Abbruch des aufrufenden Zugs). Das Startskript ändert sich erst dort.
 LOG="${LOG:-/tmp/openchamber-switch-$(date +%Y%m%d-%H%M%S).log}"
 ERR_LINES=$(wc -l < "$ERRLOG" 2>/dev/null | tr -d ' ' || echo 0)
-nohup /bin/sh "$0" --restart "$ERR_LINES" > "$LOG" 2>&1 < /dev/null &
-say "Neustart läuft abgekoppelt. Prüfung in ca. 20 s: cat $LOG"
+TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+SWITCH_RESTART_TOKEN="$TOKEN" FORCE="${FORCE:-0}" nohup /bin/sh "$0" --restart "$ERR_LINES" "$TOKEN" > "$LOG" 2>&1 < /dev/null &
+say "Neustart läuft abgekoppelt (mit zweiter Aktivitätsprüfung). Prüfung in ca. 20 s: cat $LOG"
