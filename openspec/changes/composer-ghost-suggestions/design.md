@@ -65,8 +65,9 @@ proposal.md.
    renders either the single continuation row (touch layouts, and desktop if
    D4 keeps it) or the option chips. Its X deletes both fields.
 8. **Payload parsing** in `sessionAssistMetadata.ts` gains `options: string[]`
-   with the same validation as the server (defensive, a malformed entry drops
-   the set), and `getSessionAssist` treats options as content for the
+   with the same validation as the server (defensive: each entry is checked
+   on its own and a malformed one drops alone, then fewer than 2 survivors
+   drop the set), and `getSessionAssist` treats options as content for the
    "has anything" check.
 
 ## Risks / Trade-offs
