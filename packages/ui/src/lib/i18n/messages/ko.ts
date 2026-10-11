@@ -2041,6 +2041,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.goal.cancelDialog.confirm': '목표 취소',
   'chat.suggestion.applyAria': '제안된 메시지 사용',
   'chat.suggestion.dismissAria': '제안 닫기',
+  'chat.suggestion.optionsAria': '추천 답장',
+  'chat.suggestion.ghost.description': '{key} 키를 눌러 추천 메시지 삽입: {text}',
   'header.actions.toggleTerminalPanelAria': '토글 터미널 패널',
   'terminalView.stream.processExitedMessage': '\r\n[Process exited{exitCodeSegment}{signalSegment}]\r\n',
   'terminalView.stream.processExitedWithCode': ', 종료 코드 {exitCode}',

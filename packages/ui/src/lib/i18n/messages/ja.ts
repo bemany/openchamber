@@ -2035,6 +2035,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.goal.cancelDialog.confirm': 'ゴールをキャンセル',
   'chat.suggestion.applyAria': '提案されたメッセージを使用',
   'chat.suggestion.dismissAria': '提案を閉じる',
+  'chat.suggestion.optionsAria': '返信の候補',
+  'chat.suggestion.ghost.description': '{key} キーで提案メッセージを挿入: {text}',
   'header.actions.toggleTerminalPanelAria': 'ターミナルパネルの切り替え',
   'terminalView.stream.processExitedMessage': '\r\n[プロセスが終了しました{exitCodeSegment}{signalSegment}]\r\n',
   'terminalView.stream.processExitedWithCode': ' コード {exitCode}',

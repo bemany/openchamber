@@ -2039,6 +2039,8 @@ export const dict = {
   'chat.goal.cancelDialog.confirm': 'Goal annuleren',
   'chat.suggestion.applyAria': 'Voorgesteld bericht gebruiken',
   'chat.suggestion.dismissAria': 'Suggestie sluiten',
+  'chat.suggestion.optionsAria': 'Voorgestelde antwoorden',
+  'chat.suggestion.ghost.description': 'Druk op {key} om het voorgestelde bericht in te voegen: {text}',
   'header.actions.toggleTerminalPanelAria': 'Terminalpaneel tonen of verbergen',
   'terminalView.stream.processExitedMessage': '\r\n[Proces beëindigd{exitCodeSegment}{signalSegment}]\r\n',
   'terminalView.stream.processExitedWithCode': ' met code {exitCode}',

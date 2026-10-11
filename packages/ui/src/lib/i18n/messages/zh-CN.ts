@@ -2005,6 +2005,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.goal.cancelDialog.confirm': '取消目标',
   'chat.suggestion.applyAria': '使用建议的消息',
   'chat.suggestion.dismissAria': '关闭建议',
+  'chat.suggestion.optionsAria': '建议的回复',
+  'chat.suggestion.ghost.description': '按 {key} 插入建议的消息：{text}',
   'header.actions.toggleTerminalPanelAria': '切换终端面板',
   'terminalView.stream.processExitedMessage': '\r\n[进程已退出{exitCodeSegment}{signalSegment}]\r\n',
   'terminalView.stream.processExitedWithCode': '，退出码 {exitCode}',

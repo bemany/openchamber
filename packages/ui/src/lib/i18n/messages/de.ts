@@ -1798,6 +1798,8 @@ export const dict = {
   'chat.goal.cancelDialog.confirm': 'Ziel abbrechen',
   'chat.suggestion.applyAria': 'Vorgeschlagene Nachricht verwenden',
   'chat.suggestion.dismissAria': 'Vorschlag ablehnen',
+  'chat.suggestion.optionsAria': 'Vorgeschlagene Antworten',
+  'chat.suggestion.ghost.description': 'Mit {key} die vorgeschlagene Nachricht einfügen: {text}',
   'header.actions.toggleTerminalPanelAria': 'Terminalbereich ein-/ausblenden',
   'terminalView.stream.processExitedMessage': '[Prozess beendet{exitCodeSegment}{signalSegment}]',
   'terminalView.stream.processExitedWithCode': ' mit Code {exitCode}',

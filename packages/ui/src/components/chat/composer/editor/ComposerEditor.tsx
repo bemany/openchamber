@@ -37,6 +37,7 @@ import type { ComposerLanguageContext } from '../language/tokenize';
 import type { ComposerAutoCorrect } from './autocorrect';
 import { composerLanguage, setLanguageContext } from './composerLanguage';
 import { composerBidi } from './bidi';
+import { composerGhostText, setGhostText, type ComposerGhostText } from './ghostText';
 import { replaceWithCaret } from './documentEdits';
 import type { ComposerEditorViewStore } from './viewStore';
 import { ComposerEditorView } from './ComposerEditorView';
@@ -94,6 +95,12 @@ export interface ComposerEditorProps {
     onPaste?: (event: ClipboardEvent) => void;
     languageContext: ComposerLanguageContext;
     placeholder?: string;
+    /**
+     * A suggested message drawn greyed out while the document is empty, in
+     * place of the placeholder. Whether to show it and what accepts it are the
+     * caller's decisions.
+     */
+    ghostText?: ComposerGhostText | null;
     editable?: boolean;
     spellCheck?: boolean;
     /**
@@ -173,6 +180,7 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
             value,
             languageContext,
             placeholder,
+            ghostText = null,
             editable = true,
             spellCheck = false,
             autoCorrect = 'off',
@@ -271,6 +279,7 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
                         keymap.of([...standardKeymap, ...historyKeymap]),
                         composerLanguage(handlersRef.current.languageContext),
                         composerBidi,
+                        composerGhostText,
                         editableCompartment.of(
                             EditorView.editable.of(handlersRef.current.editable ?? true),
                         ),
@@ -406,11 +415,25 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
             });
         }, [editable]);
 
+        const ghostTextValue = ghostText?.text ?? '';
+        const ghostTextHint = ghostText?.hint ?? '';
+        const ghostTextDescription = ghostText?.description ?? '';
         React.useEffect(() => {
-            viewRef.current?.dispatch({
-                effects: placeholderCompartment.reconfigure(placeholderExtension(placeholder ?? '')),
+            const view = viewRef.current;
+            if (!view) return;
+            const ghost = ghostTextValue
+                ? { text: ghostTextValue, hint: ghostTextHint, description: ghostTextDescription }
+                : null;
+            view.dispatch({
+                effects: [
+                    setGhostText.of(ghost),
+                    // The ghost text takes the placeholder's place.
+                    placeholderCompartment.reconfigure(placeholderExtension(ghost ? '' : placeholder ?? '')),
+                ],
             });
-        }, [placeholder]);
+            if (ghost) view.contentDOM.setAttribute('aria-description', ghost.description);
+            else view.contentDOM.removeAttribute('aria-description');
+        }, [ghostTextDescription, ghostTextHint, ghostTextValue, placeholder]);
 
         // Grow with the content up to `maxLines`, then scroll. The limit is
         // measured from the rendered line height rather than assumed, so it
