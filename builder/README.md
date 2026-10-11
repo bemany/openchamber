@@ -60,7 +60,8 @@ ACTIVITY_IGNORE_SESSION=ses_… sh ~/Projects/openchamber-upstream/switch-to-for
   Subagent-Ergebnis aufwacht), geht es zurück in die Warteschleife. Erst wenn sie auch nach dem Nachlauf
   ruhig sind, prüft Phase 2 **ohne** Ausnahme. `ACTIVITY_WAIT_TIMEOUT` (Default 900 s) ist ein
   Gesamtbudget inklusive Nachlauf: Jede Wartezeit wird auf das Restbudget begrenzt; passt der Nachlauf
-  nicht mehr hinein oder ist die Frist abgelaufen, gibt es keinen Neustart, Meldung im Log. Ist der
+  nicht mehr hinein, ist das sofort eine Zeitüberschreitung; erreicht die Uhr die Frist (auch genau),
+  gibt es keinen Erfolg mehr. In beiden Fällen kein Neustart, Meldung im Log. Ist der
   Live-Status zwischendurch nicht abrufbar, steht das mit Grund im Log und zählt als „läuft noch“. Der Agent sollte seinen Zug also zügig beenden; der Neustart folgt erst, wenn auch
   der Lead fertig ist.
 - Eigene Session-ID finden: in OpenChamber (Session-Info) oder in der DB über den Titel:
@@ -102,6 +103,9 @@ auch dann, wenn etwas nicht sicher geprüft werden kann:
 3. **Kürzlich geändert**: Sessions mit `session_v2.time_updated` in den letzten 120 s.
 
 Die DB wird nur mit `sqlite3 -readonly` geöffnet. Fehlt sie oder ist sie gesperrt: blockiert.
+Zahlen aus der Umgebung (`ACTIVITY_RECENT_SECONDS`, `ALLOW_STALE_HOURS`, `ACTIVITY_WAIT_TIMEOUT`,
+`ACTIVITY_SETTLE_SECONDS`, `ACTIVITY_WAIT_INTERVAL` ≥ 1, `OPENCHAMBER_PORT`, `ACTIVITY_NOW_MS`) müssen
+nicht-negative Ganzzahlen ohne führende Null sein; sonst blockiert die Prüfung bzw. das Warten mit Meldung.
 Alle Stellschrauben stehen im Kopf von `lib/activity.sh`.
 
 ### Bekannte Grenzen

@@ -11,12 +11,17 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 LIB="$HERE/../lib/activity.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/activity-test.XXXXXX")
 MOCK="$TMP/mock"
-# Bei Abbruch auch eine abgekoppelte Phase 2 aus dem nohup-Test beenden
-cleanup() {
-  [ ! -f "$MOCK/phase2.pid" ] || kill "$(cat "$MOCK/phase2.pid")" 2>/dev/null
-  [ ! -d "$MOCK" ] || : > "$MOCK/go"
-  rm -rf "$TMP"
+# Abgekoppelte Phase 2 aus dem nohup-Test samt Kindprozessen beenden und auf ihr
+# Ende warten; erst danach wird $TMP (mit der Freigabe) gelöscht.
+killtree() { for c in $(pgrep -P "$1" 2>/dev/null); do killtree "$c"; done; kill "$1" 2>/dev/null; }
+stop_phase2() {
+  [ -f "$MOCK/phase2.pid" ] || return 0
+  p2=$(cat "$MOCK/phase2.pid")
+  case "$(ps -o args= -p "$p2" 2>/dev/null)" in *" --restart "*) killtree "$p2" ;; esac
+  i=0; while kill -0 "$p2" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  rm -f "$MOCK/phase2.pid"
 }
+cleanup() { stop_phase2; rm -rf "$TMP"; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 mkdir -p "$MOCK"
@@ -301,6 +306,50 @@ ps_lines "100 1 /opt/node /a/bin/cli.js serve --port 3299"
 runs_case "runs: anderer Port -> nein" /a/bin/cli.js 1
 PS=false; runs_case "runs: ps-Fehler -> nein" /a/bin/cli.js 1
 
+# === Warteschleife mit gemockter Uhr und Zahlenprüfung ===========================
+# Uhr: Zeile n von $MOCK/clock beim n-ten Aufruf, danach die letzte Zeile
+cat > "$MOCK/clock" <<'EOF'
+#!/bin/sh
+n=$(( $(cat "$MOCK/clock.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$MOCK/clock.n"
+v=$(sed -n "${n}p" "$MOCK/clock.seq"); [ -n "$v" ] || v=$(tail -n 1 "$MOCK/clock.seq"); echo "$v"
+EOF
+chmod +x "$MOCK/clock"
+clock_seq() { rm -f "$MOCK/clock.n"; printf '%s\n' "$@" > "$MOCK/clock.seq"; }
+lib_run() { # <Setup (eval)> <Befehl (eval)>; Ausgabe und rc
+  ( ACTIVITY_DB="$DBF" ACTIVITY_NOW_MS=$NOW ACTIVITY_TAG="[t]" ACTIVITY_PS_CMD="cat $MOCK/ps" \
+      ACTIVITY_CURL="$MOCK/curl" ACTIVITY_ENV_CMD="$MOCK/env"
+    export ACTIVITY_DB ACTIVITY_NOW_MS ACTIVITY_TAG ACTIVITY_PS_CMD ACTIVITY_CURL ACTIVITY_ENV_CMD
+    eval "$1"; . "$LIB"; eval "$2" ) 2>&1
+}
+lib_case() { # <name> <rc> <muss enthalten> <Setup> <Befehl>
+  OUT=$(lib_run "$4" "$5"); RC=$?
+  ok=1; [ "$RC" = "$2" ] || ok=0; printf '%s\n' "$OUT" | grep -qF -- "$3" || ok=0
+  result "$1" $ok "rc=$RC (erwartet $2), Muster '$3'
+$OUT"
+}
+WAIT_ENV='export ACTIVITY_IGNORE_SESSION=me ACTIVITY_LIVE_CMD=true ACTIVITY_SETTLE_SECONDS=0 ACTIVITY_WAIT_TIMEOUT=10 ACTIVITY_WAIT_INTERVAL=1 ACTIVITY_DATE_CMD=$MOCK/clock'
+# Uhr-Aufrufe: Start, Schleifenanfang, vor dem Nachlauf, Erfolgsprüfung
+quiet; ign_db; clock_seq 100 100 100 110
+lib_case "Warten: Erfolgsprüfung genau an der Deadline -> Zeitüberschreitung" 1 "Zeitüberschreitung nach 10 s" "$WAIT_ENV" activity_wait_ignored
+quiet; ign_db; clock_seq 100 100 100 109
+lib_case "Warten: Erfolgsprüfung 1 s vor der Deadline -> Erfolg" 0 "auch nach 0 s nicht live" "$WAIT_ENV" activity_wait_ignored
+quiet; ign_db; clock_seq 100 110
+lib_case "Warten: Schleifenanfang genau an der Deadline -> Zeitüberschreitung" 1 "Zeitüberschreitung" "$WAIT_ENV" activity_wait_ignored
+quiet; ign_db; clock_seq 100 100 105
+lib_case "Warten: Nachlauf passt nicht ins Restbudget -> sofort Zeitüberschreitung" 1 "passt nicht mehr ins Restbudget (5 s)" "$WAIT_ENV; export ACTIVITY_SETTLE_SECONDS=6" activity_wait_ignored
+quiet; ign_db; clock_seq 100
+lib_case "Warten: Intervall 0 -> ungültig" 1 "ACTIVITY_WAIT_INTERVAL ungültig: '0' (mindestens 1)" "$WAIT_ENV; export ACTIVITY_WAIT_INTERVAL=0" activity_wait_ignored
+lib_case "Warten: Timeout negativ -> ungültig" 1 "ACTIVITY_WAIT_TIMEOUT ungültig: '-5'" "$WAIT_ENV; export ACTIVITY_WAIT_TIMEOUT=-5" activity_wait_ignored
+lib_case "Warten: Nachlauf keine Zahl -> ungültig" 1 "ACTIVITY_SETTLE_SECONDS ungültig: '2m'" "$WAIT_ENV; export ACTIVITY_SETTLE_SECONDS=2m" activity_wait_ignored
+lib_case "Warten: Uhr kaputt -> Fehler" 1 "Uhr nicht lesbar" "$WAIT_ENV; export ACTIVITY_DATE_CMD=false" activity_wait_ignored
+quiet; new_db
+lib_case "Check: ACTIVITY_RECENT_SECONDS keine Zahl -> blockiert" 1 "BLOCK  ACTIVITY_RECENT_SECONDS ungültig: 'abc'" "export ACTIVITY_RECENT_SECONDS=abc" activity_check
+lib_case "Check: ACTIVITY_RECENT_SECONDS führende Null -> blockiert" 1 "ACTIVITY_RECENT_SECONDS ungültig: '08'" "export ACTIVITY_RECENT_SECONDS=08" activity_check
+lib_case "Check: ALLOW_STALE_HOURS negativ -> blockiert" 1 "BLOCK  ALLOW_STALE_HOURS ungültig: '-1'" "export ACTIVITY_LIVE_CMD=false ALLOW_STALE_HOURS=-1" activity_check
+lib_case "Check: ALLOW_STALE_HOURS gültig -> Override greift" 0 "ALLOW_STALE_HOURS=6" "export ACTIVITY_LIVE_CMD=false ALLOW_STALE_HOURS=6" activity_check
+lib_case "Check: ACTIVITY_NOW_MS keine Zahl -> blockiert" 1 "ACTIVITY_NOW_MS ungültig" "export ACTIVITY_NOW_MS=1e12" activity_check
+lib_case "Check: OPENCHAMBER_PORT keine Zahl -> blockiert" 1 "OPENCHAMBER_PORT ungültig" "export OPENCHAMBER_PORT=x3000" activity_check
+
 # === DB-Fehler ===================================================================
 quiet; DBF="$TMP/fehlt/keine.sqlite"
 check "DB fehlt -> blockiert" 1 "BLOCK  DB nicht lesbar"
@@ -341,7 +390,7 @@ fi
 if [ -f "$MOCK/live.$n" ]; then cat "$MOCK/live.$n"; else cat "$MOCK/live.default"; fi
 EOF
 chmod +x "$MOCK/live"
-live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK"/live.fail.* "$MOCK"/live.wait.* "$MOCK/live.n" "$MOCK/go" "$MOCK/phase2.pid"; printf '%s' "$1" | tr ' ' '\n' > "$MOCK/live.default"; shift
+live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK"/live.fail.* "$MOCK"/live.wait.* "$MOCK/live.n" "$MOCK/go"; printf '%s' "$1" | tr ' ' '\n' > "$MOCK/live.default"; shift
   k=1; for v in "$@"; do printf '%s' "$v" | tr ' ' '\n' > "$MOCK/live.$k"; k=$((k + 1)); done; }
 
 script_env() {
@@ -456,6 +505,12 @@ $OUT"
 $OUT
 $(cat "$TMP/phase2.log" 2>/dev/null)"
 
+  # Vorab exportierte _PROOF_DIR/_PROOF_TOKEN erreichen keinen Kindprozess
+  db_s2; ps_idle; live_seq ''; reset_start "$FROM"; rm -f "$MOCK/launchctl.env"
+  OUT=$(script_env _PROOF_DIR=/tmp/vorab _PROOF_TOKEN=vorab sh "$SP" 2>&1); RC=$?
+  result "$S: vorab exportierte _PROOF_* bei launchctl nicht sichtbar" "$(all "$([ $RC = 0 ] && echo 1)" "$(called)" "$([ -f "$MOCK/launchctl.env" ] && [ ! -s "$MOCK/launchctl.env" ] && echo 1)")" "rc=$RC
+$(sed 's/=.*/=<…>/' "$MOCK/launchctl.env" 2>/dev/null)"
+
   # Wechsel ruhig -> aktiv zwischen beiden Prüfungen: kein Neustart
   db_s2; ps_idle; live_seq 's2' ''; reset_start "$FROM"
   OUT=$(script_env sh "$SP" 2>&1); RC=$?
@@ -491,7 +546,7 @@ $(cat "$TMP/phase2.log" 2>/dev/null)"
   T0=$(date +%s)
   OUT=$(script_env ACTIVITY_IGNORE_SESSION=me ACTIVITY_WAIT_TIMEOUT=1 ACTIVITY_SETTLE_SECONDS=120 sh "$SP" 2>&1); RC=$?
   T1=$(date +%s)
-  result "$S: Timeout 1 s, Nachlauf 120 s -> kein Neustart, Laufzeit ≈ Timeout" "$(all "$([ $RC = 1 ] && echo 1)" "$([ $((T1 - T0)) -le 4 ] && echo 1)" "$(loghas 'passt nicht mehr ins Budget')" "$(loghas 'Zeitüberschreitung nach 1 s')" "$(called | tr 1 2 | tr 0 1)")" "rc=$RC dauer=$((T1 - T0))
+  result "$S: Timeout 1 s, Nachlauf 120 s -> kein Neustart, Laufzeit ≈ Timeout" "$(all "$([ $RC = 1 ] && echo 1)" "$([ $((T1 - T0)) -le 2 ] && echo 1)" "$(loghas 'passt nicht mehr ins Restbudget')" "$(loghas 'Zeitüberschreitung nach 1 s')" "$(called | tr 1 2 | tr 0 1)")" "rc=$RC dauer=$((T1 - T0))
 $(cat "$TMP/phase2.log" 2>/dev/null)"
 
   # Live-Status nach dem Nachlauf nicht abrufbar: eigene Meldung, weiter warten, dann Neustart
@@ -519,7 +574,7 @@ done
 for S in switch-to-fork.sh switch-to-npm.sh; do
   SP="$HERE/../$S"
   if [ "$S" = switch-to-fork.sh ]; then FROM=$NPMCLI; else FROM=$FORKCLI; fi
-  db_s2; ps_idle; live_seq ''; : > "$MOCK/live.wait.2"; reset_start "$FROM"; rm -f "$MOCK/launchctl.env"
+  stop_phase2; db_s2; ps_idle; live_seq ''; : > "$MOCK/live.wait.2"; reset_start "$FROM"; rm -f "$MOCK/launchctl.env"
   OUT=$(script_env SWITCH_SYNC=0 sh "$SP" 2>&1); RC=$?
   i=0; while [ ! -f "$MOCK/phase2.pid" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
   P2=$(cat "$MOCK/phase2.pid" 2>/dev/null || true)
@@ -527,7 +582,8 @@ for S in switch-to-fork.sh switch-to-npm.sh; do
   EARLY=$(called)
   : > "$MOCK/go"
   i=0; while [ $i -lt 300 ] && ! grep -qF -- '--- Ende' "$TMP/phase2.log" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
-  rm -f "$MOCK/phase2.pid"
+  # Nur nach sauberem Ende vergessen; sonst beendet stop_phase2/cleanup sie
+  ! grep -qF -- '--- Ende' "$TMP/phase2.log" 2>/dev/null || rm -f "$MOCK/phase2.pid"
   result "$S: nohup-Pfad: Phase 1 zurück, Phase 2 läuft abgekoppelt weiter" "$(all "$([ $RC = 0 ] && echo 1)" "$(has 'Neustart läuft abgekoppelt')" "$ALIVE" "$([ "$EARLY" = 0 ] && echo 1)" "$(called)" "$(loghas '--- Ende')")" "rc=$RC phase2=$P2 lebt=$ALIVE früh=$EARLY
 $OUT
 $(cat "$TMP/phase2.log" 2>/dev/null)"
