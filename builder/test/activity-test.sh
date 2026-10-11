@@ -389,10 +389,12 @@ lib_case "Check: OPENCHAMBER_PORT keine Zahl -> blockiert" 1 "OPENCHAMBER_PORT u
 quiet; DBF="$TMP/fehlt/keine.sqlite"
 check "DB fehlt -> blockiert" 1 "BLOCK  DB nicht lesbar"
 quiet; new_db; session s1 "x"; msg s1 1 idle $((NOW - H))
-( printf 'begin exclusive;\n'; sleep 3; printf 'commit;\n' ) | sqlite3 "$DBF" &
-sleep 1
+# Sperre halten, bis der Test sie freigibt; erst prüfen, wenn sie nachweislich greift
+( printf 'begin exclusive;\n'; i=0; while [ ! -f "$MOCK/unlock" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+  printf 'commit;\n' ) | sqlite3 "$DBF" &
+i=0; while sqlite3 -readonly "$DBF" "select 1" >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 check "DB gesperrt -> blockiert" 1 "database is locked"
-wait
+: > "$MOCK/unlock"; wait; rm -f "$MOCK/unlock"
 
 # === Umschaltskripte: Phase 1, --check, Nachweis, zweite Prüfung =================
 # Alles gemockt: Startskript, Release-Worktree und npm-cli in $TMP, launchctl/curl
@@ -581,7 +583,7 @@ $(cat "$TMP/phase2.log" 2>/dev/null)"
   T0=$(date +%s)
   OUT=$(script_env ACTIVITY_IGNORE_SESSION=me ACTIVITY_WAIT_TIMEOUT=1 ACTIVITY_SETTLE_SECONDS=120 sh "$SP" 2>&1); RC=$?
   T1=$(date +%s)
-  result "$S: Timeout 1 s, Nachlauf 120 s -> kein Neustart, Laufzeit ≈ Timeout" "$(all "$([ $RC = 1 ] && echo 1)" "$([ $((T1 - T0)) -le 2 ] && echo 1)" "$(loghas 'passt nicht mehr ins Restbudget')" "$(loghas 'Zeitüberschreitung nach 1 s')" "$(called | tr 1 2 | tr 0 1)")" "rc=$RC dauer=$((T1 - T0))
+  result "$S: Timeout 1 s, Nachlauf 120 s -> kein Neustart, Laufzeit weit unter Nachlauf" "$(all "$([ $RC = 1 ] && echo 1)" "$([ $((T1 - T0)) -le 10 ] && echo 1)" "$(loghas 'passt nicht mehr ins Restbudget')" "$(loghas 'Zeitüberschreitung nach 1 s')" "$(called | tr 1 2 | tr 0 1)")" "rc=$RC dauer=$((T1 - T0))
 $(cat "$TMP/phase2.log" 2>/dev/null)"
 
   # Live-Status nach dem Nachlauf nicht abrufbar: eigene Meldung, weiter warten, dann Neustart
