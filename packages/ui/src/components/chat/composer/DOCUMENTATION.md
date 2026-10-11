@@ -94,9 +94,10 @@ writes either one continuation `suggestion` or 2 to 3 reply `options` per turn.
 `ChatInput` reads both once through `useSessionAssistState` and passes them
 down. Reply options are chips in the suggestion row on every layout; a chip
 replaces the composer text with its option and focuses it. The continuation
-is the row's single line only on the mobile layout (`isMobile`). With a
-hardware keyboard (desktop web, Electron, VS Code webview) it is ghost text
-instead, and so is the first reply option, beside its chip. The row's X
+is the row's single line on phones and touch tablets (`isMobile` from the UI
+store, `isTablet` from `useDeviceInfo`), which have no Tab. On every other
+layout (desktop web, Electron, VS Code webview) it is ghost text instead, and
+so is the first reply option, beside its chip. The row's X
 removes `suggestion` and `options` from the session metadata
 (`withoutAssistSuggestions`), so they disappear in every client.
 Nothing here ever sends, answers a question form, or grants a permission.
@@ -104,18 +105,23 @@ Nothing here ever sends, answers a question form, or grants a permission.
 Ghost text is drawn by `editor/ghostText.ts`, a widget at position 0 that the
 document never contains: `getValue()` stays empty, the placeholder makes way,
 the widget is `aria-hidden`, and the editor carries an `aria-description`
-naming the text and the accept key. It shows under the suggestion row's
-hiding rules plus three of its own: the document is empty (whitespace counts
-as content here), the composer is in normal mode, and the payload was not
-dismissed. `ghostTextKeyAction` in `keyboardPolicy.ts` decides the keys
-while no picker is open: plain Tab inserts the text through the chip's path
-(caret at the end, focused, not sent); Escape dismisses and does nothing
+naming the text and the accept key. `state/ghostText.ts` decides
+when it shows and what keys do to it. It shows under the suggestion row's
+hiding rules plus four of its own: a keyboard layout, an empty document
+(whitespace counts as content here), normal mode, and a payload not yet used
+up. While no picker is open, plain Tab inserts the text through the chips'
+path (caret at the end, focused, not sent); Escape dismisses and does nothing
 else, ahead of the expanded-mode Escape; a typed character dismisses and
-types. Any edit that fills the empty composer dismisses too, which covers
-paste. Without visible ghost text Tab keeps its `cycle_agent` meaning, and
-Shift+Tab always does. A dismissal is local to this composer and keyed by
-session and payload (`forMessageID` + `generatedAt`): clearing the text
-does not bring it back, a new payload does, and the metadata is untouched.
+types. Any edit that fills the empty composer and any paste, including one
+that becomes an attachment, dismiss too. Without visible ghost text Tab keeps
+its `cycle_agent` meaning, and Shift+Tab always does.
+Taking a suggestion (Tab, a chip, the row) replaces the text as one undo step
+of its own (`replaceAllAsOwnStep` in `editor/documentEdits.ts`), so typing
+right after it undoes separately. Taking and dismissing both use up the
+payload, locally to this composer and keyed by session and payload
+(`forMessageID` + `generatedAt`): clearing the text does not bring the ghost
+text back, a new payload does, and the metadata is untouched. One entry is
+kept per session, at most 50 sessions.
 
 `selectComposerQueue` in the submission builder excludes server-scheduled items
 before the composer counts manual content or reads captured send configuration.
