@@ -5,14 +5,14 @@
 #   sh switch-to-fork.sh            # prüft, sichert, schaltet um, prüft
 #   FORCE=1 sh switch-to-fork.sh    # auch wenn gerade Sessions aktiv sind
 #   sh switch-to-fork.sh --check    # nur Aktivität melden (auch CHECK_ONLY=1), ändert nichts
+#   ACTIVITY_IGNORE_SESSION=ses_… sh switch-to-fork.sh   # aus einer Agent-Session (README.md)
 #
-# Aktivitätsregel: builder/lib/activity.sh (README.md).
+# Aktivitätsregel und Ablauf: builder/README.md.
 #
 # ACHTUNG: Der Neustart beendet auch die von OpenChamber gestartete OpenCode-
-# Instanz. Laufende Agent-Züge brechen ab, auch der Zug, der dieses Skript
-# eventuell aufruft. Deshalb laufen zweite Aktivitätsprüfung, Umschreiben des
-# Startskripts, Neustart und Prüfung abgekoppelt per nohup (interne Phase
-# --restart, nur mit Token) und schreiben nach $LOG.
+# Instanz. Laufende Agent-Züge brechen ab. Deshalb laufen zweite Aktivitäts-
+# prüfung, Umschreiben des Startskripts, Neustart und Prüfung abgekoppelt per
+# nohup (interne Phase --restart, nur mit Einmal-Nachweis) und schreiben nach $LOG.
 set -eu
 
 RELEASE="${SWITCH_RELEASE:-$HOME/Projects/openchamber-release}"
@@ -25,7 +25,9 @@ SERVICE="gui/$(id -u)/dev.openchamber.web"
 ERRLOG="${SWITCH_ERRLOG:-$HOME/Library/Logs/OpenChamber/startup.err.log}"
 LAUNCHCTL="${SWITCH_LAUNCHCTL:-launchctl}"
 CURL="${SWITCH_CURL:-curl}"
-# Verzeichnis des Skripts (auch über Symlink aufgerufen), für lib/activity.sh
+TMP="$START.tmp.$$"
+trap 'rm -f "$TMP"' EXIT
+# Verzeichnis des Skripts (auch über Symlink aufgerufen), für lib/
 SELF="$0"
 while [ -L "$SELF" ]; do
   LINK=$(readlink "$SELF")
@@ -35,11 +37,11 @@ BUILDER_DIR=$(cd "$(dirname "$SELF")" && pwd)
 
 say() { echo "[switch-to-fork] $*"; }
 die() { echo "[switch-to-fork] FEHLER: $*" >&2; exit 1; }
-# Läuft "<…>/node <cli> serve …"? (pgrep sieht den LaunchAgent-Prozess nicht zuverlässig)
-runs() { ps -axo args= | awk -v p="$1" '$1 ~ /\/node$/ && $2 == p && $3 == "serve" {f=1} END {exit !f}'; }
 
 ACTIVITY_TAG="[switch-to-fork]"
 . "$BUILDER_DIR/lib/activity.sh"
+. "$BUILDER_DIR/lib/phase.sh"
+runs() { activity_runs_cli "$1"; }
 
 # Nur prüfen: vor jedem anderen Zweig, endet immer ohne Seiteneffekte (Exit 1 = aktiv)
 for a in "$@"; do case "$a" in --check) CHECK_ONLY=1 ;; esac; done
@@ -50,32 +52,37 @@ fi
 
 # Startskript auf den Fork umschreiben (nur der cli.js-Pfad), atomar per mv
 rewrite_start() {
+  [ -f "$START" ] || die "$START fehlt"
   if grep -qF "$FORK_CLI" "$START"; then
     say "Startskript zeigt schon auf den Fork"
     return 0
   fi
-  TMP="$START.tmp.$$"
   sed "s|$NPM_CLI|$FORK_CLI|" "$START" > "$TMP"
-  grep -qF "$FORK_CLI" "$TMP" || { rm -f "$TMP"; die "Pfadersetzung fehlgeschlagen"; }
+  grep -qF "$FORK_CLI" "$TMP" || die "Pfadersetzung fehlgeschlagen"
   chmod 700 "$TMP"
   mv "$TMP" "$START"
   say "Startskript umgestellt"
 }
 
-# Interne Phase (abgekoppelt): zweite Prüfung, Umschreiben, Neustart, Prüfung.
-# Nur erreichbar mit dem Token, das Phase 1 beim nohup-Aufruf setzt.
-if [ "${1:-}" = "--restart" ]; then
-  [ -n "${SWITCH_RESTART_TOKEN:-}" ] && [ "${SWITCH_RESTART_TOKEN}" = "${3:-}" ] ||
-    die "--restart ist eine interne Phase und nicht direkt aufrufbar"
-  ERR_LINES="${2:-0}"
-  echo "Zweite Aktivitätsprüfung $(date)"
-  if ! activity_check; then
-    if [ "${FORCE:-0}" = "1" ]; then
-      say "FORCE=1: Aktivität ignoriert"
-    else
-      die "Aktivität seit der ersten Prüfung: kein Neustart, Startskript unverändert. Später erneut oder FORCE=1."
-    fi
+# Sicherung (nur einmal, und nur wenn sie wirklich die npm-Version enthält)
+ensure_backup() {
+  if [ ! -f "$BACKUP" ]; then
+    grep -qF "$FORK_CLI" "$START" && { say "Startskript zeigt schon auf den Fork, keine Sicherung nötig"; return 0; }
+    grep -qF "$NPM_CLI" "$START" || die "$START zeigt nicht auf die npm-Version, Sicherung wäre falsch. Bitte prüfen."
+    cp -p "$START" "$BACKUP"
+    say "Sicherung angelegt: $BACKUP"
+  else
+    grep -qF "$NPM_CLI" "$BACKUP" || die "$BACKUP enthält nicht den npm-Pfad"
+    say "Sicherung vorhanden: $BACKUP"
   fi
+}
+
+# Interne Phase (abgekoppelt): Nachweis verbrauchen, warten/zweite Prüfung,
+# Startskript umschreiben, Neustart, Prüfung.
+if [ "${1:-}" = "--restart" ]; then
+  phase_proof_claim
+  ERR_LINES="${2:-0}"
+  phase_gate
   rewrite_start
   echo "Neustart $(date)"
   $LAUNCHCTL kickstart -k "$SERVICE"
@@ -104,34 +111,27 @@ HEAD=$(git -C "$RELEASE" rev-parse HEAD)
 [ -z "$(git -C "$RELEASE" status --porcelain --untracked-files=no)" ] || die "Release-Worktree hat lokale Änderungen"
 [ -f "$START" ] || die "$START fehlt"
 
-# 2. Aktivität (Sessions, Build-/Simulator-Prozesse): Neustart würde sie abbrechen
+# 2. Läuft der Fork schon? Dann nur Sicherung/Startskript angleichen, ohne Prüfung und Neustart.
+if runs "$FORK_CLI"; then
+  ensure_backup
+  rewrite_start
+  say "Fork läuft bereits, kein Neustart nötig"
+  exit 0
+fi
+
+# 3. Aktivität (Sessions, Build-/Simulator-Prozesse): Neustart würde sie abbrechen
 if [ "${FORCE:-0}" != "1" ]; then
   activity_check || die "Aktivität erkannt (siehe oben). Neustart würde laufende Züge abbrechen. Später erneut oder FORCE=1."
 else
   activity_check || say "FORCE=1: Aktivität ignoriert"
 fi
 
-# 3. Sicherung (nur einmal, und nur wenn sie wirklich die npm-Version enthält)
-if [ ! -f "$BACKUP" ]; then
-  grep -qF "$NPM_CLI" "$START" || die "$START zeigt nicht auf die npm-Version, Sicherung wäre falsch. Bitte prüfen."
-  cp -p "$START" "$BACKUP"
-  say "Sicherung angelegt: $BACKUP"
-else
-  grep -qF "$NPM_CLI" "$BACKUP" || die "$BACKUP enthält nicht den npm-Pfad"
-  say "Sicherung vorhanden: $BACKUP"
-fi
+# 4. Sicherung
+ensure_backup
 
-# 4. Läuft der Fork schon? Dann nur das Startskript angleichen, kein Neustart.
-if runs "$FORK_CLI"; then
-  rewrite_start
-  say "Fork läuft bereits, kein Neustart nötig"
-  exit 0
-fi
-
-# 5. Zweite Prüfung, Umschreiben, Neustart + Prüfung abgekoppelt (überlebt den
-#    Abbruch des aufrufenden Zugs). Das Startskript ändert sich erst dort.
+# 5. Warten/zweite Prüfung, Umschreiben, Neustart + Prüfung abgekoppelt
+#    (überlebt den Abbruch des aufrufenden Zugs). Das Startskript ändert sich erst dort.
 LOG="${LOG:-/tmp/openchamber-switch-$(date +%Y%m%d-%H%M%S).log}"
 ERR_LINES=$(wc -l < "$ERRLOG" 2>/dev/null | tr -d ' ' || echo 0)
-TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-SWITCH_RESTART_TOKEN="$TOKEN" FORCE="${FORCE:-0}" nohup /bin/sh "$0" --restart "$ERR_LINES" "$TOKEN" > "$LOG" 2>&1 < /dev/null &
-say "Neustart läuft abgekoppelt (mit zweiter Aktivitätsprüfung). Prüfung in ca. 20 s: cat $LOG"
+phase_spawn "$LOG" --restart "$ERR_LINES"
+say "Neustart läuft abgekoppelt (mit zweiter Aktivitätsprüfung). Prüfung: cat $LOG"

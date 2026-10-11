@@ -17,6 +17,13 @@
 #  3. Sessions, deren session_v2.time_updated jünger als ACTIVITY_RECENT_SECONDS ist.
 #  DB nicht lesbar (fehlt, gesperrt) = blockiert.
 #
+#   ACTIVITY_IGNORE_SESSION=<id>  nimmt diese Session und ihre Vorfahren (parent_id)
+#   von Live- und 120-s-Regel aus (Aufrufer aus einer Agent-Session). Wer neu
+#   startet, muss danach activity_wait_ignored und eine Prüfung ohne Ausnahme machen.
+#
+#   activity_wait_ignored   # wartet, bis die ausgenommenen Sessions nicht mehr live sind
+#   activity_runs_cli <cli> # läuft "<cli> serve … --port $OPENCHAMBER_PORT"?
+#
 # Überschreibbar (v. a. für Tests):
 #   ACTIVITY_DB                Pfad zur OpenCode-DB (nur -readonly geöffnet)
 #   ALLOW_STALE_HOURS          Ausdrücklicher Override bei fehlendem Live-Status (leer = aus)
@@ -33,6 +40,8 @@
 #                              späteres Argument arg (z. B. xcrun … simctl)
 #   ACTIVITY_PROCESS_IGNORE    awk-Regex auf die Befehlszeile, Treffer zählen nicht
 #                              (Default: "simctl list", das serve-sim nur lesend pollt)
+#   ACTIVITY_WAIT_TIMEOUT      Sekunden für activity_wait_ignored, Default 900
+#   ACTIVITY_WAIT_INTERVAL     Sekunden zwischen zwei Abfragen beim Warten, Default 10
 #   ACTIVITY_TAG               Präfix der Ausgabezeilen
 
 ACTIVITY_DB="${ACTIVITY_DB:-$HOME/.local/share/opencode/opencode.db}"
@@ -91,7 +100,11 @@ activity_live_default() {
   case "$_port" in '' | *[!0-9]*) echo "Port der OpenCode-Instanz (PID $_pid) nicht lesbar"; return 1 ;; esac
   case "$_host" in '' | 0.0.0.0) _host=127.0.0.1 ;; *[!A-Za-z0-9.-]*) echo "Host '$_host' nicht unterstützt"; return 1 ;; esac
 
-  _pw=$(eval "$ACTIVITY_ENV_CMD \"\$_pid\"" 2>/dev/null | tr ' ' '\n' | sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' | head -n 1)
+  # Prozessumgebung erst vollständig erfassen (Exitcode geprüft), dann parsen
+  _env=$(eval "$ACTIVITY_ENV_CMD \"\$_pid\"" 2>/dev/null) || { _env=; echo "Prozessumgebung von PID $_pid nicht lesbar"; return 1; }
+  [ -n "$_env" ] || { echo "Prozessumgebung von PID $_pid leer"; return 1; }
+  _pw=$(printf '%s\n' "$_env" | tr ' ' '\n' | sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' | head -n 1)
+  _env=
   # curl-Konfiguration: Wert in Anführungszeichen, \ und " escapen
   _pw=$(printf '%s' "$_pw" | sed 's/[\\"]/\\&/g')
   _resp=$(
@@ -140,6 +153,67 @@ activity_processes() {
     }'
 }
 
+# Läuft "<…> <cli> serve … --port $OPENCHAMBER_PORT" (auch --port=N)? Fehler = nein.
+activity_runs_cli() {
+  _rps=$(eval "$ACTIVITY_PS_CMD") || return 1
+  printf '%s\n' "$_rps" | awk -v cli="$1" -v want="$OPENCHAMBER_PORT" '{
+    port = ""; srv = 0
+    for (i = 3; i <= NF; i++) {
+      if ($i == cli && $(i + 1) == "serve") srv = 1
+      if ($i == "--port" && i < NF) port = $(i + 1)
+      else if (index($i, "--port=") == 1) port = substr($i, 8)
+    }
+    if (srv && port == want) f = 1
+  } END { exit !f }'
+}
+
+# ACTIVITY_IGNORE_SESSION und seine Vorfahren (parent_id-Kette), eine ID pro Zeile.
+# Ungültige ID oder DB-Fehler: Grund auf stdout, Exit 1.
+activity_ignored_ids() {
+  _id=${ACTIVITY_IGNORE_SESSION:-}
+  case "$_id" in '' | *[!A-Za-z0-9_]*) echo "ACTIVITY_IGNORE_SESSION ungültig: '$_id'"; return 1 ;; esac
+  _anc=$(sqlite3 -readonly "$ACTIVITY_DB" "
+    with recursive anc(id, parent) as (
+      select id, parent_id from session_v2 where id = '$_id'
+      union select s.id, s.parent_id from session_v2 s join anc a on s.id = a.parent)
+    select id from anc" 2>&1) || { echo "DB nicht lesbar für ACTIVITY_IGNORE_SESSION: $(printf '%s' "$_anc" | head -n 1)"; return 1; }
+  # Unbekannte ID: nur sie selbst (Tippfehler führt so höchstens zur Selbstblockade)
+  [ -n "$_anc" ] || _anc=$_id
+  printf '%s\n' "$_anc"
+}
+
+# Wartet, bis keine der ausgenommenen Sessions mehr live läuft. 0 = beendet,
+# 1 = Zeitüberschreitung oder IDs nicht ermittelbar. Live-Status nicht
+# verfügbar zählt als "läuft noch".
+activity_wait_ignored() {
+  _ids=$(activity_ignored_ids) || { activity_say "$_ids"; return 1; }
+  _deadline=$(($(date +%s) + ${ACTIVITY_WAIT_TIMEOUT:-900}))
+  _last=
+  activity_say "Warte, bis die Aufrufer-Sessions fertig sind: $(printf '%s' "$_ids" | tr '\n' ' ')(höchstens ${ACTIVITY_WAIT_TIMEOUT:-900} s)"
+  while :; do
+    _wps=$(eval "$ACTIVITY_PS_CMD") || _wps=
+    if _wlive=$(activity_live "$_wps"); then
+      _still=$(printf '%s\n' "$_wlive" | awk -v ids="$(printf '%s' "$_ids" | tr '\n' ' ')" '
+        BEGIN { n = split(ids, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 }
+        ($0 in want) { printf "%s ", $0 }')
+      if [ -z "$_still" ]; then
+        activity_say "Aufrufer-Sessions laufen nicht mehr"
+        return 0
+      fi
+      _now_msg="läuft noch: $_still"
+    else
+      _now_msg="Live-Status nicht verfügbar: $(printf '%s' "$_wlive" | tail -n 1)"
+    fi
+    [ "$_now_msg" = "$_last" ] || activity_say "$_now_msg"
+    _last=$_now_msg
+    if [ "$(date +%s)" -ge "$_deadline" ]; then
+      activity_say "Zeitüberschreitung nach ${ACTIVITY_WAIT_TIMEOUT:-900} s"
+      return 1
+    fi
+    sleep "${ACTIVITY_WAIT_INTERVAL:-10}"
+  done
+}
+
 activity_check() {
   _now=${ACTIVITY_NOW_MS:-$(($(date +%s) * 1000))}
   _recent_ms=$((ACTIVITY_RECENT_SECONDS * 1000))
@@ -176,6 +250,18 @@ activity_check() {
     _cand=
   }
 
+  # Ausgenommene Aufrufer-Sessions (ACTIVITY_IGNORE_SESSION samt Vorfahren)
+  _ign=
+  if [ -n "${ACTIVITY_IGNORE_SESSION:-}" ]; then
+    if _ign=$(activity_ignored_ids); then
+      activity_add "INFO   Ausgenommen (Aufrufer): $(printf '%s' "$_ign" | tr '\n' ' ')"
+    else
+      activity_add "BLOCK  $_ign"
+      _ign=
+    fi
+  fi
+  _ignl=$(printf '%s' "$_ign" | tr '\n' ' ')
+
   _stale_ms=
   if _live=$(activity_live "$_ps"); then
     _mode=live
@@ -196,12 +282,16 @@ activity_check() {
     esac
   fi
 
-  _rep=$(printf '%s\n' "$_cand" | awk -F "$_tab" -v mode="$_mode" -v stale="$_stale_ms" -v live="$(printf '%s' "$_live" | tr '\n' ' ')" '
-    BEGIN { n = split(live, ids, " "); for (i = 1; i <= n; i++) if (ids[i] != "") running[ids[i]] = 1 }
+  _rep=$(printf '%s\n' "$_cand" | awk -F "$_tab" -v mode="$_mode" -v stale="$_stale_ms" -v live="$(printf '%s' "$_live" | tr '\n' ' ')" -v ign="$_ignl" '
+    BEGIN {
+      n = split(live, ids, " "); for (i = 1; i <= n; i++) if (ids[i] != "") running[ids[i]] = 1
+      n = split(ign, ids, " "); for (i = 1; i <= n; i++) if (ids[i] != "") ignored[ids[i]] = 1
+    }
     NF >= 6 {
       seen[$1] = 1
       line = sprintf("%s  \"%s\"  letzter=%s  %s  parent=%s", $1, $2, $3, $4, $5)
-      if (mode == "live") {
+      if ($1 in ignored) print "IGNORE Session " line " (ignoriert (Aufrufer))"
+      else if (mode == "live") {
         if ($1 in running) print "BLOCK  Session " line " (live: läuft)"
         else print "IGNORE Session " line " (live: nicht laufend, vermutlich abgebrochen)"
       } else if (mode == "age") {
@@ -209,7 +299,12 @@ activity_check() {
         else print "IGNORE Session " line " (älter als " stale / 3600000 " h, per ALLOW_STALE_HOURS ignoriert)"
       } else print "BLOCK  Session " line " (Live-Status unbekannt)"
     }
-    END { for (id in running) if (!(id in seen)) print "BLOCK  Session " id " (live: läuft, DB-Eintrag idle oder unbekannt)" }')
+    END {
+      for (id in running) if (!(id in seen)) {
+        if (id in ignored) print "IGNORE Session " id " (live: läuft, ignoriert (Aufrufer))"
+        else print "BLOCK  Session " id " (live: läuft, DB-Eintrag idle oder unbekannt)"
+      }
+    }')
   [ -z "$_rep" ] || activity_add "$_rep"
 
   # 2. Prozesse
@@ -224,8 +319,12 @@ activity_check() {
       select id, substr(replace(replace(coalesce(title, ''), char(9), ' '), char(10), ' '), 1, 50),
              datetime(time_updated / 1000, 'unixepoch', 'localtime')
       from session_v2 where time_updated > $_now - $_recent_ms order by time_updated desc" 2>&1); then
-      _recent=$(printf '%s\n' "$_recent" | awk -F "$_tab" -v s="$ACTIVITY_RECENT_SECONDS" \
-        'NF >= 3 { printf "BLOCK  Kürzlich %s  \"%s\"  geändert %s (< %s s)\n", $1, $2, $3, s }')
+      _recent=$(printf '%s\n' "$_recent" | awk -F "$_tab" -v s="$ACTIVITY_RECENT_SECONDS" -v ign="$_ignl" '
+        BEGIN { n = split(ign, a, " "); for (i = 1; i <= n; i++) ignored[a[i]] = 1 }
+        NF >= 3 {
+          if ($1 in ignored) printf "IGNORE Kürzlich %s  \"%s\"  geändert %s (ignoriert (Aufrufer))\n", $1, $2, $3
+          else printf "BLOCK  Kürzlich %s  \"%s\"  geändert %s (< %s s)\n", $1, $2, $3, s
+        }')
       [ -z "$_recent" ] || activity_add "$_recent"
     else
       activity_add "BLOCK  DB nicht lesbar: $ACTIVITY_DB ($(printf '%s' "$_recent" | head -n 1 | cut -c1-100))"

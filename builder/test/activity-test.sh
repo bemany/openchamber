@@ -96,8 +96,9 @@ check() {
   OUT=$(
     ACTIVITY_DB="$DBF" ACTIVITY_NOW_MS=$NOW ACTIVITY_TAG="[t]" \
       ACTIVITY_LIVE_CMD="${LIVE:-}" ACTIVITY_PS_CMD="${PS:-cat $MOCK/ps}" \
-      ACTIVITY_CURL="$MOCK/curl" ACTIVITY_ENV_CMD="$MOCK/env" ALLOW_STALE_HOURS="${ALLOW:-}"
-    export ACTIVITY_DB ACTIVITY_NOW_MS ACTIVITY_TAG ACTIVITY_LIVE_CMD ACTIVITY_PS_CMD ACTIVITY_CURL ACTIVITY_ENV_CMD ALLOW_STALE_HOURS
+      ACTIVITY_CURL="$MOCK/curl" ACTIVITY_ENV_CMD="$MOCK/env" ALLOW_STALE_HOURS="${ALLOW:-}" \
+      ACTIVITY_IGNORE_SESSION="${IGN:-}"
+    export ACTIVITY_DB ACTIVITY_NOW_MS ACTIVITY_TAG ACTIVITY_LIVE_CMD ACTIVITY_PS_CMD ACTIVITY_CURL ACTIVITY_ENV_CMD ALLOW_STALE_HOURS ACTIVITY_IGNORE_SESSION
     . "$LIB"
     activity_check 2>&1
   )
@@ -108,7 +109,7 @@ check() {
   if [ -n "${4:-}" ] && printf '%s\n' "$OUT" | grep -qF -- "$4"; then ok=0; fi
   result "$1" $ok "rc=$RC (erwartet $2), Muster '$3'
 $OUT"
-  LIVE=; PS=; ALLOW=
+  LIVE=; PS=; ALLOW=; IGN=
 }
 
 # Standard: ruhige Prozessliste mit eindeutiger Instanz, API meldet nichts laufend
@@ -158,7 +159,7 @@ LIVE=false; ALLOW=6; check "ALLOW_STALE_HOURS=6, Kandidat jung -> blockiert" 1 "
 
 # === activity_live_default (echte Abfrage, gemockt) ==============================
 live_run() { # gibt Ausgabe und rc der Live-Abfrage auf Basis von $MOCK/ps
-  ( ACTIVITY_CURL="$MOCK/curl" ACTIVITY_ENV_CMD="$MOCK/env"; . "$LIB"; activity_live_default "$(cat "$MOCK/ps")" ) 2>&1
+  ( ACTIVITY_CURL="$MOCK/curl" ACTIVITY_ENV_CMD="${ENVCMD:-$MOCK/env}"; . "$LIB"; activity_live_default "$(cat "$MOCK/ps")" ) 2>&1
 }
 live_case() { # <name> <rc> <muss enthalten>
   OUT=$(live_run); RC=$?
@@ -218,6 +219,13 @@ EOF
 api '{"_tag":"UnauthorizedError"}' 401
 check "Passwort erscheint nicht in der Ausgabe" 1 "HTTP 401" "Geh31m-Pw"
 
+# Prozessumgebung: Exitcode geprüft, leer = Fehler
+printf '#!/bin/sh\necho "/x/opencode serve OPENCODE_SERVER_PASSWORD=pw"\nexit 1\n' > "$MOCK/envpartial"; chmod +x "$MOCK/envpartial"
+quiet; ENVCMD=false live_case "Live: Prozessumgebung Fehler -> Fehler" 1 "Prozessumgebung von PID 200 nicht lesbar"
+quiet; ENVCMD="$MOCK/envpartial" live_case "Live: Prozessumgebung Teil-Ausgabe + Fehlercode -> Fehler" 1 "nicht lesbar"
+quiet; ENVCMD=true live_case "Live: Prozessumgebung leer -> Fehler" 1 "Prozessumgebung von PID 200 leer"
+result "Live: nach Umgebungsfehler kein curl-Aufruf" "$(rm -f "$MOCK/curl.url"; ENVCMD=false live_run >/dev/null; [ ! -f "$MOCK/curl.url" ] && echo 1 || echo 0)" ""
+
 # === Live-Fehler blockieren activity_check =======================================
 quiet; new_db; : > "$MOCK/curl.fail"
 check "activity_check: curl-Fehler -> blockiert" 1 "BLOCK  Live-Status nicht verfügbar: Abfrage"
@@ -250,6 +258,42 @@ check "xctest -> aktiv" 1 "BLOCK  Prozess 205"
 quiet; new_db; ps_lines "$OC" "$OCS" "206 1 /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/simctl install booted /tmp/A.app"
 check "simctl install -> aktiv" 1 "BLOCK  Prozess 206"
 
+# === Ausnahme für den Aufrufer (ACTIVITY_IGNORE_SESSION) ==========================
+ign_db() { new_db; session root "Lead"; msg root 1 assistant $((NOW - 600000))
+  session mid "Worker" root; msg mid 1 assistant $((NOW - 300000))
+  session me "Ich" mid; msg me 1 assistant $((NOW - 60000))
+  session other "Fremd"; msg other 1 idle $((NOW - H)); }
+quiet; ign_db; api '{"data":{"root":{},"mid":{},"me":{}}}'
+IGN=me; check "Ignore: Aufrufer und Vorfahren ausgenommen -> ruhig" 0 "IGNORE Session root" "BLOCK"
+quiet; ign_db; api '{"data":{"root":{},"mid":{},"me":{}}}'
+IGN=me; check "Ignore: als Aufrufer gelistet" 0 "ignoriert (Aufrufer)"
+quiet; ign_db; api '{"data":{"root":{},"mid":{},"me":{},"other":{}}}'
+IGN=me; check "Ignore: andere Session läuft -> aktiv" 1 "BLOCK  Session other"
+quiet; ign_db; api '{"data":{"root":{},"mid":{},"me":{}}}'
+IGN=mid; check "Ignore: nur Vorfahren, Kind läuft -> aktiv" 1 "BLOCK  Session me"
+quiet; ign_db; api '{"data":{"me":{}}}'; sqlite3 "$DBF" "update session_v2 set time_updated = $((NOW - 10000)) where id in ('me', 'other')"
+IGN=me; check "Ignore: 120-s-Regel nimmt Aufrufer aus, andere nicht" 1 "BLOCK  Kürzlich other"
+quiet; ign_db; api '{"data":{"me":{}}}'; sqlite3 "$DBF" "update session_v2 set time_updated = $((NOW - 10000)) where id = 'me'"
+IGN=me; check "Ignore: 120-s-Regel Aufrufer -> IGNORE" 0 "IGNORE Kürzlich me"
+quiet; ign_db; api '{"data":{"me":{}}}'
+IGN="me'; drop table x; --"; check "Ignore: ungültige ID -> blockiert" 1 "ACTIVITY_IGNORE_SESSION ungültig"
+quiet; ign_db; api '{"data":{"me":{}}}'
+IGN=ses_unbekannt; check "Ignore: unbekannte ID nimmt nichts aus" 1 "BLOCK  Session me"
+
+# === activity_runs_cli ==========================================================
+runs_case() { # <name> <cli> <0/1 erwartet>
+  R=$( ACTIVITY_PS_CMD="${PS:-cat $MOCK/ps}"; . "$LIB"; activity_runs_cli "$2" && echo 0 || echo 1 )
+  result "$1" "$([ "$R" = "$3" ] && echo 1 || echo 0)" "rc=$R"; PS=
+}
+ps_lines "1 0 /sbin/launchd" "100 1 /opt/node /a/bin/cli.js serve --foreground --port 3000 --host 0.0.0.0"
+runs_case "runs: --port 3000 -> läuft" /a/bin/cli.js 0
+runs_case "runs: anderer cli-Pfad -> nein" /b/bin/cli.js 1
+ps_lines "100 1 /opt/node /a/bin/cli.js serve --port=3000"
+runs_case "runs: --port=3000 -> läuft" /a/bin/cli.js 0
+ps_lines "100 1 /opt/node /a/bin/cli.js serve --port 3299"
+runs_case "runs: anderer Port -> nein" /a/bin/cli.js 1
+PS=false; runs_case "runs: ps-Fehler -> nein" /a/bin/cli.js 1
+
 # === DB-Fehler ===================================================================
 quiet; DBF="$TMP/fehlt/keine.sqlite"
 check "DB fehlt -> blockiert" 1 "BLOCK  DB nicht lesbar"
@@ -259,70 +303,159 @@ sleep 1
 check "DB gesperrt -> blockiert" 1 "database is locked"
 wait
 
-# === Umschaltskripte: --check, --restart, zweite Prüfung =========================
-# script_run <skript> <args…>; Umgebung: alles gemockt, Startskript in $TMP
+# === Umschaltskripte: Phase 1, --check, Nachweis, zweite Prüfung =================
+# Alles gemockt: Startskript, Release-Worktree und npm-cli in $TMP, launchctl/curl
+# als Skripte, Live-Status über einen Zähler-Mock, Phase 2 synchron (SWITCH_SYNC=1).
+REL="$TMP/release"
+mkdir -p "$REL/packages/web/bin" "$REL/packages/web/dist" "$REL/node_modules" "$TMP/npm/bin" "$TMP/tmpdir"
+git -C "$REL" init -q && git -C "$REL" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+: > "$REL/packages/web/bin/cli.js"; : > "$REL/packages/web/dist/index.html"; : > "$TMP/npm/bin/cli.js"
+RELHEAD=$(git -C "$REL" rev-parse HEAD)
+FORKCLI="$REL/packages/web/bin/cli.js"
+NPMCLI="$TMP/npm/bin/cli.js"
+
+# Live-Status pro Aufruf: $MOCK/live.<n> (fehlt: live.default), Zähler in live.n
+cat > "$MOCK/live" <<'EOF'
+#!/bin/sh
+n=$(( $(cat "$MOCK/live.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$MOCK/live.n"
+if [ -f "$MOCK/live.$n" ]; then cat "$MOCK/live.$n"; else cat "$MOCK/live.default"; fi
+EOF
+chmod +x "$MOCK/live"
+live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK/live.n"; printf '%s' "$1" | tr ' ' '\n' > "$MOCK/live.default"; shift
+  k=1; for v in "$@"; do printf '%s' "$v" | tr ' ' '\n' > "$MOCK/live.$k"; k=$((k + 1)); done; }
+
 script_env() {
-  SWITCH_RELEASE="$TMP/release" SWITCH_NPM_CLI="$TMP/npm/bin/cli.js" SWITCH_START="$TMP/start/OpenChamber" \
+  env SWITCH_RELEASE="$REL" EXPECTED_COMMIT="$RELHEAD" SWITCH_NPM_CLI="$NPMCLI" SWITCH_START="$TMP/start/OpenChamber" \
     SWITCH_ERRLOG="$TMP/err.log" SWITCH_LAUNCHCTL="$MOCK/launchctl" SWITCH_CURL="$MOCK/health" \
-    ACTIVITY_DB="$DBF" ACTIVITY_NOW_MS=$NOW ACTIVITY_PS_CMD="cat $MOCK/ps" \
-    ACTIVITY_CURL="$MOCK/curl" ACTIVITY_ENV_CMD="$MOCK/env" "$@"
+    SWITCH_SYNC=1 LOG="$TMP/phase2.log" TMPDIR="$TMP/tmpdir" \
+    ACTIVITY_DB="$DBF" ACTIVITY_NOW_MS=$NOW ACTIVITY_PS_CMD="cat $MOCK/ps" ACTIVITY_LIVE_CMD="$MOCK/live" \
+    ACTIVITY_RECENT_SECONDS=1 ACTIVITY_WAIT_INTERVAL=1 "$@"
 }
+# Startskript zeigt auf <cli>; keine Sicherung, kein Log, kein launchctl-Aufruf
 reset_start() {
-  mkdir -p "$TMP/start" "$TMP/npm/bin"; rm -f "$MOCK/launchctl.log" "$TMP/start/"*
-  printf '#!/bin/sh\nexec /opt/node %s serve --port 3000\n' "$TMP/npm/bin/cli.js" > "$TMP/start/OpenChamber"
-  : > "$TMP/npm/bin/cli.js"
+  rm -rf "$TMP/start" "$MOCK/launchctl.log" "$TMP/phase2.log" "$TMP/tmpdir"/*; mkdir -p "$TMP/start"
+  printf '#!/bin/sh\nexec /opt/node %s serve --port 3000\n' "$1" > "$TMP/start/OpenChamber"
   cp "$TMP/start/OpenChamber" "$TMP/start.orig"
 }
 called() { [ -s "$MOCK/launchctl.log" ] && echo 1 || echo 0; }
 unchanged() { cmp -s "$TMP/start/OpenChamber" "$TMP/start.orig" && echo 1 || echo 0; }
-active() { quiet; new_db; session s2 "Läuft"; msg s2 1 assistant $((NOW - 300000)); api '{"data":{"s2":{"type":"running"}}}'; }
+noproof() { [ -z "$(ls -A "$TMP/tmpdir")" ] && echo 1 || echo 0; }
+noTmp() { [ -z "$(ls "$TMP/start" | grep '\.tmp\.')" ] && echo 1 || echo 0; }
+# DB: s2 hat einen offenen Zug (assistant zuletzt); live entscheidet
+db_s2() { new_db; session s2 "Läuft"; msg s2 1 assistant $((NOW - 300000)); }
+ps_idle() { ps_lines "1 0 /sbin/launchd" "100 1 /opt/node /old/bin/cli.js serve --port 3000"; }
+both() { [ "$1" = 1 ] && [ "$2" = 1 ] && echo 1 || echo 0; }
+all() { for x in "$@"; do [ "$x" = 1 ] || { echo 0; return; }; done; echo 1; }
+has() { printf '%s' "$OUT" | grep -qF -- "$1" && echo 1 || echo 0; }
+loghas() { grep -qF -- "$1" "$TMP/phase2.log" 2>/dev/null && echo 1 || echo 0; }
 
 for S in switch-to-fork.sh switch-to-npm.sh; do
   SP="$HERE/../$S"
-  # npm-Skript braucht als Ausgangslage ein Startskript, das auf den Fork zeigt
-  start_for() { reset_start; if [ "$S" = switch-to-npm.sh ]; then
-    printf '#!/bin/sh\nexec /opt/node %s serve --port 3000\n' "$TMP/release/packages/web/bin/cli.js" > "$TMP/start/OpenChamber"
-    cp "$TMP/start/OpenChamber" "$TMP/start.orig"; fi; }
+  if [ "$S" = switch-to-fork.sh ]; then FROM=$NPMCLI; TO=$FORKCLI; else FROM=$FORKCLI; TO=$NPMCLI; fi
 
-  quiet; new_db; start_for
-  OUT=$(script_env env CHECK_ONLY=1 SWITCH_RESTART_TOKEN=tok sh "$SP" --restart 0 tok 2>&1); RC=$?
-  result "$S: CHECK_ONLY=1 … --restart -> nur Prüfung" \
-    "$([ $RC = 0 ] && [ "$(called)" = 0 ] && [ "$(unchanged)" = 1 ] && printf '%s' "$OUT" | grep -q 'Ergebnis: ruhig' && echo 1 || echo 0)" "rc=$RC
+  # --check / CHECK_ONLY vor allem anderen, auch zusammen mit --restart
+  db_s2; ps_idle; live_seq ''; reset_start "$FROM"
+  OUT=$(script_env CHECK_ONLY=1 sh "$SP" --restart 0 2>&1); RC=$?
+  result "$S: CHECK_ONLY=1 … --restart -> nur Prüfung" "$(all "$([ $RC = 0 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$(has 'Ergebnis: ruhig')")" "rc=$RC
 $OUT"
-  quiet; new_db; start_for
+  reset_start "$FROM"
   OUT=$(script_env sh "$SP" --restart 0 --check 2>&1); RC=$?
-  result "$S: --restart --check -> nur Prüfung" \
-    "$([ $RC = 0 ] && [ "$(called)" = 0 ] && [ "$(unchanged)" = 1 ] && echo 1 || echo 0)" "rc=$RC
+  result "$S: --restart --check -> nur Prüfung" "$(all "$([ $RC = 0 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)")" "rc=$RC
 $OUT"
 
-  quiet; new_db; start_for
+  # --restart ohne echten Nachweis aus Phase 1
+  reset_start "$FROM"
   OUT=$(script_env sh "$SP" --restart 0 2>&1); RC=$?
-  result "$S: direktes --restart ohne Token -> abgewiesen" \
-    "$([ $RC = 1 ] && [ "$(called)" = 0 ] && [ "$(unchanged)" = 1 ] && printf '%s' "$OUT" | grep -q 'interne Phase' && echo 1 || echo 0)" "rc=$RC
+  result "$S: --restart ohne Nachweis -> abgewiesen" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$(has 'interne Phase')")" "rc=$RC
 $OUT"
-  OUT=$(script_env env SWITCH_RESTART_TOKEN=a sh "$SP" --restart 0 b 2>&1); RC=$?
-  result "$S: --restart mit falschem Token -> abgewiesen" \
-    "$([ $RC = 1 ] && [ "$(called)" = 0 ] && echo 1 || echo 0)" "rc=$RC
+  OUT=$(script_env SWITCH_PROOF_DIR="$TMP/tmpdir/openchamber-switch.fake" SWITCH_PROOF_TOKEN=abc sh "$SP" --restart 0 2>&1); RC=$?
+  result "$S: --restart, selbst gesetzte Variablen ohne Datei -> abgewiesen" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(has 'Nachweis fehlt')")" "rc=$RC
 $OUT"
-
-  active; start_for
-  OUT=$(script_env env SWITCH_RESTART_TOKEN=tok sh "$SP" --restart 0 tok 2>&1); RC=$?
-  result "$S: zweite Prüfung aktiv -> kein Neustart, Startskript unverändert" \
-    "$([ $RC = 1 ] && [ "$(called)" = 0 ] && [ "$(unchanged)" = 1 ] && echo 1 || echo 0)" "rc=$RC
+  mkdir -p "$TMP/forged"; chmod 700 "$TMP/forged"; echo abc > "$TMP/forged/token"
+  OUT=$(script_env SWITCH_PROOF_DIR="$TMP/forged" SWITCH_PROOF_TOKEN=abc sh "$SP" --restart 0 2>&1); RC=$?
+  result "$S: --restart, Nachweis am falschen Ort -> abgewiesen" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(has 'falschen Ort')")" "rc=$RC
 $OUT"
-
-  quiet; new_db; start_for
-  OUT=$(script_env env SWITCH_RESTART_TOKEN=tok sh "$SP" --restart 0 tok 2>&1); RC=$?
-  result "$S: zweite Prüfung ruhig -> umgeschrieben und Neustart" \
-    "$([ $RC = 0 ] && [ "$(called)" = 1 ] && [ "$(unchanged)" = 0 ] && grep -q 'kickstart -k' "$MOCK/launchctl.log" && echo 1 || echo 0)" "rc=$RC
+  F="$TMP/tmpdir/openchamber-switch.open"; mkdir -p "$F"; chmod 755 "$F"; echo abc > "$F/token"
+  OUT=$(script_env SWITCH_PROOF_DIR="$F" SWITCH_PROOF_TOKEN=abc sh "$SP" --restart 0 2>&1); RC=$?
+  result "$S: --restart, Nachweis-Verzeichnis nicht 0700 -> abgewiesen" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(has 'nicht 0700')")" "rc=$RC
+$OUT"
+  rm -rf "$F"; F="$TMP/tmpdir/openchamber-switch.wrong"; mkdir -p "$F"; chmod 700 "$F"; echo abc > "$F/token"
+  OUT=$(script_env SWITCH_PROOF_DIR="$F" SWITCH_PROOF_TOKEN=xyz sh "$SP" --restart 0 2>&1); RC=$?
+  result "$S: --restart, falsches Token -> abgewiesen, Nachweis verbraucht" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(has 'passt nicht')" "$([ ! -d "$F" ] && echo 1)")" "rc=$RC
 $OUT"
 
-  active; start_for
-  OUT=$(script_env env FORCE=1 SWITCH_RESTART_TOKEN=tok sh "$SP" --restart 0 tok 2>&1); RC=$?
-  result "$S: zweite Prüfung aktiv + FORCE=1 -> Neustart, Aktivität gelistet" \
-    "$([ $RC = 0 ] && [ "$(called)" = 1 ] && printf '%s' "$OUT" | grep -q 'BLOCK  Session s2' && echo 1 || echo 0)" "rc=$RC
+  # Echter Nachweis gilt genau einmal; Wiederholung mit denselben Werten scheitert
+  db_s2; ps_idle; live_seq ''; reset_start "$FROM"
+  PRF=$(TMPDIR="$TMP/tmpdir"; die() { exit 1; }; . "$HERE/../lib/phase.sh"; phase_proof_create; echo "$PROOF_DIR $PROOF_TOKEN")
+  OUT=$(script_env SWITCH_PROOF_DIR="${PRF% *}" SWITCH_PROOF_TOKEN="${PRF#* }" sh "$SP" --restart 0 2>&1); RC=$?
+  result "$S: --restart mit echtem Nachweis -> Neustart, Nachweis gelöscht" "$(all "$([ $RC = 0 ] && echo 1)" "$(called)" "$(noproof)")" "rc=$RC
 $OUT"
+  reset_start "$FROM"
+  OUT=$(script_env SWITCH_PROOF_DIR="${PRF% *}" SWITCH_PROOF_TOKEN="${PRF#* }" sh "$SP" --restart 0 2>&1); RC=$?
+  result "$S: --restart, Nachweis wiederverwendet -> abgewiesen" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(has 'interne Phase')")" "rc=$RC
+$OUT"
+
+  # Phase 1: Aktivität blockt vor Sicherung und Umschreiben
+  db_s2; ps_idle; live_seq 's2'; reset_start "$FROM"
+  OUT=$(script_env sh "$SP" 2>&1); RC=$?
+  result "$S: Phase 1 aktiv -> Abbruch, nichts geändert" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$([ ! -f "$TMP/start/OpenChamber.npm-2.2.0.bak" ] && echo 1)" "$(noproof)" "$(has 'BLOCK  Session s2')")" "rc=$RC
+$OUT"
+
+  # Ziel läuft schon: Exit 0 ohne Prüfung, auch wenn etwas aktiv ist
+  db_s2; live_seq 's2'; reset_start "$TO"; ps_lines "1 0 /sbin/launchd" "100 1 /opt/node $TO serve --foreground --port 3000"
+  OUT=$(script_env sh "$SP" 2>&1); RC=$?
+  result "$S: Ziel läuft schon -> Exit 0 ohne Prüfung" "$(all "$([ $RC = 0 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(has 'läuft bereits')" "$(has 'Ergebnis' | tr 1 2 | tr 0 1)")" "rc=$RC
+$OUT"
+  ps_lines "1 0 /sbin/launchd" "100 1 /opt/node $TO serve --port 3299"
+  OUT=$(script_env sh "$SP" 2>&1); RC=$?
+  result "$S: Ziel nur auf anderem Port -> prüft (aktiv)" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'BLOCK  Session s2')")" "rc=$RC
+$OUT"
+
+  # Integration: Phase 1 ruhig -> Phase 2 ruhig -> Umschreiben + Neustart
+  db_s2; ps_idle; live_seq ''; reset_start "$FROM"
+  OUT=$(script_env sh "$SP" 2>&1); RC=$?
+  result "$S: Integration ruhig -> Neustart" "$(all "$([ $RC = 0 ] && echo 1)" "$(called)" "$(unchanged | tr 1 2 | tr 0 1)" "$(grep -qF "$TO" "$TMP/start/OpenChamber" && echo 1)" "$(loghas 'Zweite Aktivitätsprüfung')" "$(loghas '--- Ende')" "$(noproof)" "$(noTmp)")" "rc=$RC
+$OUT
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+
+  # Wechsel ruhig -> aktiv zwischen beiden Prüfungen: kein Neustart
+  db_s2; ps_idle; live_seq 's2' ''; reset_start "$FROM"
+  OUT=$(script_env sh "$SP" 2>&1); RC=$?
+  result "$S: ruhig -> aktiv vor Neustart -> kein Neustart" "$(all "$([ $RC = 0 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$(loghas 'zweiten Prüfung: kein Neustart')" "$(noproof)")" "rc=$RC
+$OUT
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+
+  # FORCE=1: zweite Prüfung aktiv -> trotzdem Neustart, Aktivität gelistet
+  db_s2; ps_idle; live_seq 's2' ''; reset_start "$FROM"
+  OUT=$(script_env FORCE=1 sh "$SP" 2>&1); RC=$?
+  result "$S: FORCE=1, aktiv in Phase 2 -> Neustart, gelistet" "$(all "$([ $RC = 0 ] && echo 1)" "$(called)" "$(loghas 'BLOCK  Session s2')")" "rc=$RC
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+
+  # Aufrufer-Ausnahme: Phase 1 ruhig trotz eigener Session, Phase 2 wartet, dann Neustart
+  ign_db; ps_idle; live_seq '' 'root mid me' 'root mid me' 'mid'; reset_start "$FROM"
+  OUT=$(script_env ACTIVITY_IGNORE_SESSION=me sh "$SP" 2>&1); RC=$?
+  result "$S: Ignore + Warten -> Neustart nach Ende des Aufrufers" "$(all "$([ $RC = 0 ] && echo 1)" "$(has 'ignoriert (Aufrufer)')" "$(called)" "$(loghas 'läuft noch: root mid me')" "$(loghas 'Aufrufer-Sessions laufen nicht mehr')")" "rc=$RC
+$OUT
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+
+  # Aufrufer-Ausnahme mit Zeitüberschreitung: kein Neustart
+  ign_db; ps_idle; live_seq 'me' ; reset_start "$FROM"
+  OUT=$(script_env ACTIVITY_IGNORE_SESSION=me ACTIVITY_WAIT_TIMEOUT=2 sh "$SP" 2>&1); RC=$?
+  result "$S: Ignore + Zeitüberschreitung -> kein Neustart" "$(all "$([ $RC = 0 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$(loghas 'Zeitüberschreitung')" "$(loghas 'nicht rechtzeitig fertig')")" "rc=$RC
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+
+  # Aufrufer-Ausnahme, aber nach dem Warten ist eine andere Session aktiv
+  ign_db; ps_idle; live_seq 'other' 'me' 'me'; reset_start "$FROM"
+  OUT=$(script_env ACTIVITY_IGNORE_SESSION=me sh "$SP" 2>&1); RC=$?
+  result "$S: Ignore, danach andere Session aktiv -> kein Neustart" "$(all "$([ $RC = 0 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(loghas 'BLOCK  Session other')")" "rc=$RC
+$(cat "$TMP/phase2.log" 2>/dev/null)"
 done
+
+# switch-to-npm.sh: Startskript fehlt -> sauberer Abbruch vor sed, keine Temp-Datei
+db_s2; ps_idle; live_seq ''; reset_start "$FORKCLI"; rm -f "$TMP/start/OpenChamber"
+OUT=$(script_env sh "$HERE/../switch-to-npm.sh" 2>&1); RC=$?
+result "switch-to-npm.sh: Startskript fehlt -> Abbruch" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'fehlt, Startskript von Hand prüfen')" "$(called | tr 1 2 | tr 0 1)" "$(noTmp)")" "rc=$RC
+$OUT"
 
 echo "---"
 if [ $FAIL = 0 ]; then echo "alle $N Tests grün"; exit 0; fi
