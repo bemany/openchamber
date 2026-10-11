@@ -58,8 +58,10 @@ ACTIVITY_IGNORE_SESSION=ses_… sh ~/Projects/openchamber-upstream/switch-to-for
   10 s), wartet dann `ACTIVITY_SETTLE_SECONDS` (Default `ACTIVITY_RECENT_SECONDS` = 120 s) wegen ihres
   eigenen `time_updated` und fragt erneut. Läuft eine davon wieder (z. B. der Lead, der nach dem
   Subagent-Ergebnis aufwacht), geht es zurück in die Warteschleife. Erst wenn sie auch nach dem Nachlauf
-  ruhig sind, prüft Phase 2 **ohne** Ausnahme. Gesamt-Timeout `ACTIVITY_WAIT_TIMEOUT` (Default 900 s,
-  inklusive Nachlauf): kein Neustart, Meldung im Log. Der Agent sollte seinen Zug also zügig beenden; der Neustart folgt erst, wenn auch
+  ruhig sind, prüft Phase 2 **ohne** Ausnahme. `ACTIVITY_WAIT_TIMEOUT` (Default 900 s) ist ein
+  Gesamtbudget inklusive Nachlauf: Jede Wartezeit wird auf das Restbudget begrenzt; passt der Nachlauf
+  nicht mehr hinein oder ist die Frist abgelaufen, gibt es keinen Neustart, Meldung im Log. Ist der
+  Live-Status zwischendurch nicht abrufbar, steht das mit Grund im Log und zählt als „läuft noch“. Der Agent sollte seinen Zug also zügig beenden; der Neustart folgt erst, wenn auch
   der Lead fertig ist.
 - Eigene Session-ID finden: in OpenChamber (Session-Info) oder in der DB über den Titel:
   `sqlite3 -readonly ~/.local/share/opencode/opencode.db "select id, title from session_v2 order by time_updated desc limit 5"`.

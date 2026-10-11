@@ -16,6 +16,7 @@
 
 # Nachweis für die interne Phase als allererstes aus der Umgebung nehmen
 # (nicht exportiert weiterführen), damit kein Kindprozess ihn sieht.
+unset _PROOF_DIR _PROOF_TOKEN
 _PROOF_DIR=${SWITCH_PROOF_DIR:-}
 _PROOF_TOKEN=${SWITCH_PROOF_TOKEN:-}
 unset SWITCH_PROOF_DIR SWITCH_PROOF_TOKEN

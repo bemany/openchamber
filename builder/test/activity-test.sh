@@ -10,8 +10,15 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 LIB="$HERE/../lib/activity.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/activity-test.XXXXXX")
-trap 'rm -rf "$TMP"' EXIT INT TERM
 MOCK="$TMP/mock"
+# Bei Abbruch auch eine abgekoppelte Phase 2 aus dem nohup-Test beenden
+cleanup() {
+  [ ! -f "$MOCK/phase2.pid" ] || kill "$(cat "$MOCK/phase2.pid")" 2>/dev/null
+  [ ! -d "$MOCK" ] || : > "$MOCK/go"
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 mkdir -p "$MOCK"
 
 NOW=1800000000000          # festes "jetzt" in ms
@@ -318,11 +325,23 @@ NPMCLI="$TMP/npm/bin/cli.js"
 cat > "$MOCK/live" <<'EOF'
 #!/bin/sh
 n=$(( $(cat "$MOCK/live.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$MOCK/live.n"
-[ ! -f "$MOCK/live.sleep.$n" ] || sleep "$(cat "$MOCK/live.sleep.$n")"
+# live.fail.<n>: Live-Status nicht abrufbar
+if [ -f "$MOCK/live.fail.$n" ]; then echo "Mock: Abfrage $n fehlgeschlagen"; exit 1; fi
+# live.wait.<n>: Handshake; Phase 2 (oberster Vorfahr mit " --restart ") merken
+# und warten, bis der Test $MOCK/go anlegt (höchstens 30 s)
+if [ -f "$MOCK/live.wait.$n" ]; then
+  p=$PPID; top=
+  while [ "${p:-1}" -gt 1 ]; do
+    case "$(ps -o args= -p "$p")" in *" --restart "*) top=$p ;; esac
+    p=$(ps -o ppid= -p "$p" | tr -d ' ')
+  done
+  [ -z "$top" ] || echo "$top" > "$MOCK/phase2.pid"
+  i=0; while [ ! -f "$MOCK/go" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+fi
 if [ -f "$MOCK/live.$n" ]; then cat "$MOCK/live.$n"; else cat "$MOCK/live.default"; fi
 EOF
 chmod +x "$MOCK/live"
-live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK"/live.sleep.* "$MOCK/live.n"; printf '%s' "$1" | tr ' ' '\n' > "$MOCK/live.default"; shift
+live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK"/live.fail.* "$MOCK"/live.wait.* "$MOCK/live.n" "$MOCK/go" "$MOCK/phase2.pid"; printf '%s' "$1" | tr ' ' '\n' > "$MOCK/live.default"; shift
   k=1; for v in "$@"; do printf '%s' "$v" | tr ' ' '\n' > "$MOCK/live.$k"; k=$((k + 1)); done; }
 
 script_env() {
@@ -467,6 +486,20 @@ $(cat "$TMP/phase2.log" 2>/dev/null)"
   result "$S: Aufrufer bleibt nach Nachlauf live -> Gesamt-Timeout, kein Neustart" "$(all "$([ $RC = 1 ] && echo 1)" "$(loghas 'wieder live')" "$(loghas 'Zeitüberschreitung')" "$(called | tr 1 2 | tr 0 1)")" "rc=$RC
 $(cat "$TMP/phase2.log" 2>/dev/null)"
 
+  # Gesamtbudget inkl. Nachlauf: Timeout 1 s, Nachlauf 120 s -> kein Neustart, Laufzeit ≈ Timeout
+  ign_db; ps_idle; live_seq '' 'me'; reset_start "$FROM"
+  T0=$(date +%s)
+  OUT=$(script_env ACTIVITY_IGNORE_SESSION=me ACTIVITY_WAIT_TIMEOUT=1 ACTIVITY_SETTLE_SECONDS=120 sh "$SP" 2>&1); RC=$?
+  T1=$(date +%s)
+  result "$S: Timeout 1 s, Nachlauf 120 s -> kein Neustart, Laufzeit ≈ Timeout" "$(all "$([ $RC = 1 ] && echo 1)" "$([ $((T1 - T0)) -le 4 ] && echo 1)" "$(loghas 'passt nicht mehr ins Budget')" "$(loghas 'Zeitüberschreitung nach 1 s')" "$(called | tr 1 2 | tr 0 1)")" "rc=$RC dauer=$((T1 - T0))
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+
+  # Live-Status nach dem Nachlauf nicht abrufbar: eigene Meldung, weiter warten, dann Neustart
+  ign_db; ps_idle; live_seq '' 'me' '' 'x' '' ''; rm -f "$MOCK/live.3"; : > "$MOCK/live.fail.3"; reset_start "$FROM"
+  OUT=$(script_env ACTIVITY_IGNORE_SESSION=me sh "$SP" 2>&1); RC=$?
+  result "$S: Live nach Nachlauf nicht abrufbar -> eigene Meldung, weiter warten" "$(all "$([ $RC = 0 ] && echo 1)" "$(loghas 'Live-Status nicht abrufbar: Mock: Abfrage 3 fehlgeschlagen, warte weiter')" "$(loghas 'wieder live' | tr 1 2 | tr 0 1)" "$(called)")" "rc=$RC
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+
   # Aufrufer-Ausnahme mit Zeitüberschreitung: kein Neustart
   ign_db; ps_idle; live_seq 'me' ; reset_start "$FROM"
   OUT=$(script_env ACTIVITY_IGNORE_SESSION=me ACTIVITY_WAIT_TIMEOUT=2 sh "$SP" 2>&1); RC=$?
@@ -480,19 +513,22 @@ $(cat "$TMP/phase2.log" 2>/dev/null)"
 $(cat "$TMP/phase2.log" 2>/dev/null)"
 done
 
-# Echter nohup-Pfad (ohne SWITCH_SYNC): Phase 1 kehrt sofort zurück, Phase 2 läuft
-# abgekoppelt (zweite Live-Abfrage dauert 2 s), verbraucht den Nachweis, und
-# launchctl sieht keine Nachweis-Variablen.
+# Echter nohup-Pfad (ohne SWITCH_SYNC), mit Handshake: Phase 2 hängt in ihrer
+# Live-Abfrage, bis der Test $MOCK/go anlegt. Das geschieht erst, nachdem Phase 1
+# zurückgekehrt ist; bis dahin darf launchctl nicht aufgerufen worden sein.
 for S in switch-to-fork.sh switch-to-npm.sh; do
   SP="$HERE/../$S"
   if [ "$S" = switch-to-fork.sh ]; then FROM=$NPMCLI; else FROM=$FORKCLI; fi
-  db_s2; ps_idle; live_seq ''; echo 2 > "$MOCK/live.sleep.2"; reset_start "$FROM"; rm -f "$MOCK/launchctl.env"
-  T0=$(date +%s)
+  db_s2; ps_idle; live_seq ''; : > "$MOCK/live.wait.2"; reset_start "$FROM"; rm -f "$MOCK/launchctl.env"
   OUT=$(script_env SWITCH_SYNC=0 sh "$SP" 2>&1); RC=$?
-  T1=$(date +%s)
+  i=0; while [ ! -f "$MOCK/phase2.pid" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  P2=$(cat "$MOCK/phase2.pid" 2>/dev/null || true)
+  ALIVE=$([ -n "$P2" ] && kill -0 "$P2" 2>/dev/null && echo 1 || echo 0)
   EARLY=$(called)
-  i=0; while [ $i -lt 30 ] && ! grep -qF -- '--- Ende' "$TMP/phase2.log" 2>/dev/null; do sleep 1; i=$((i + 1)); done
-  result "$S: nohup-Pfad: Phase 1 sofort zurück, Phase 2 abgekoppelt" "$(all "$([ $RC = 0 ] && echo 1)" "$([ $((T1 - T0)) -lt 2 ] && echo 1)" "$([ "$EARLY" = 0 ] && echo 1)" "$(has 'Neustart läuft abgekoppelt')" "$(called)" "$(loghas '--- Ende')")" "rc=$RC dauer=$((T1 - T0)) früh=$EARLY
+  : > "$MOCK/go"
+  i=0; while [ $i -lt 300 ] && ! grep -qF -- '--- Ende' "$TMP/phase2.log" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  rm -f "$MOCK/phase2.pid"
+  result "$S: nohup-Pfad: Phase 1 zurück, Phase 2 läuft abgekoppelt weiter" "$(all "$([ $RC = 0 ] && echo 1)" "$(has 'Neustart läuft abgekoppelt')" "$ALIVE" "$([ "$EARLY" = 0 ] && echo 1)" "$(called)" "$(loghas '--- Ende')")" "rc=$RC phase2=$P2 lebt=$ALIVE früh=$EARLY
 $OUT
 $(cat "$TMP/phase2.log" 2>/dev/null)"
   result "$S: nohup-Pfad: Nachweis verbraucht, keine Nachweis-Variablen bei launchctl" "$(all "$(noproof)" "$([ -f "$MOCK/launchctl.env" ] && [ ! -s "$MOCK/launchctl.env" ] && echo 1)")" "$(ls -A "$TMP/tmpdir"; cat "$MOCK/launchctl.env" 2>/dev/null | sed 's/=.*/=<…>/')"

@@ -197,41 +197,62 @@ activity_ignored_live() {
 # Wartet, bis keine der ausgenommenen Sessions mehr live läuft und das auch nach
 # ACTIVITY_SETTLE_SECONDS (Default ACTIVITY_RECENT_SECONDS, wegen ihres eigenen
 # time_updated) noch so ist. Wacht eine wieder auf (Lead nach Subagent), geht es
-# zurück in die Warteschleife. 0 = fertig, 1 = Gesamt-Timeout
-# (ACTIVITY_WAIT_TIMEOUT) oder IDs nicht ermittelbar. Live-Status nicht
-# verfügbar zählt als "läuft noch".
+# zurück in die Warteschleife. ACTIVITY_WAIT_TIMEOUT ist ein Gesamtbudget
+# inklusive Nachlauf: jedes sleep wird auf den Rest begrenzt, ein abgekürzter
+# Nachlauf oder eine abgelaufene Frist ist kein Erfolg.
+# 0 = fertig, 1 = Zeitüberschreitung oder IDs nicht ermittelbar. Live-Status
+# nicht abrufbar zählt als "läuft noch".
 activity_wait_ignored() {
   _ids=$(activity_ignored_ids) || { activity_say "$_ids"; return 1; }
   _timeout=${ACTIVITY_WAIT_TIMEOUT:-900}
   _settle=${ACTIVITY_SETTLE_SECONDS:-$ACTIVITY_RECENT_SECONDS}
   _deadline=$(($(date +%s) + _timeout))
   _last=
-  activity_say "Warte, bis die Aufrufer-Sessions fertig sind: $(printf '%s' "$_ids" | tr '\n' ' ')(höchstens $_timeout s)"
+  activity_say "Warte, bis die Aufrufer-Sessions fertig sind: $(printf '%s' "$_ids" | tr '\n' ' ')(höchstens $_timeout s inkl. $_settle s Nachlauf)"
   while :; do
+    _rest=$((_deadline - $(date +%s)))
+    if [ "$_rest" -le 0 ]; then
+      activity_say "Zeitüberschreitung nach $_timeout s"
+      return 1
+    fi
+    _now_msg=
     if _still=$(activity_ignored_live "$_ids"); then
       if [ -z "$_still" ]; then
+        _rest=$((_deadline - $(date +%s)))
+        if [ "$_rest" -lt "$_settle" ]; then
+          activity_say "Aufrufer-Sessions laufen nicht mehr, aber der Nachlauf ($_settle s) passt nicht mehr ins Budget"
+          [ "$_rest" -le 0 ] || sleep "$_rest"
+          activity_say "Zeitüberschreitung nach $_timeout s"
+          return 1
+        fi
         activity_say "Aufrufer-Sessions laufen nicht mehr, warte $_settle s"
         sleep "$_settle"
-        if _still=$(activity_ignored_live "$_ids") && [ -z "$_still" ]; then
-          activity_say "Aufrufer-Sessions auch nach $_settle s nicht live"
-          return 0
+        if _still=$(activity_ignored_live "$_ids"); then
+          if [ -z "$_still" ]; then
+            if [ "$(date +%s)" -gt "$_deadline" ]; then
+              activity_say "Zeitüberschreitung nach $_timeout s"
+              return 1
+            fi
+            activity_say "Aufrufer-Sessions auch nach $_settle s nicht live"
+            return 0
+          fi
+          activity_say "Aufrufer-Sessions wieder live: $_still, warte weiter"
+        else
+          activity_say "Live-Status nicht abrufbar: $_still, warte weiter"
         fi
-        activity_say "Aufrufer-Sessions wieder live: ${_still:-Live-Status nicht verfügbar}, warte weiter"
         _last=
-        _now_msg=
       else
         _now_msg="läuft noch: $_still"
       fi
     else
-      _now_msg="Live-Status nicht verfügbar: $_still"
+      _now_msg="Live-Status nicht abrufbar: $_still"
     fi
     [ -z "$_now_msg" ] || [ "$_now_msg" = "$_last" ] || activity_say "$_now_msg"
     _last=$_now_msg
-    if [ "$(date +%s)" -ge "$_deadline" ]; then
-      activity_say "Zeitüberschreitung nach $_timeout s"
-      return 1
-    fi
-    sleep "${ACTIVITY_WAIT_INTERVAL:-10}"
+    _rest=$((_deadline - $(date +%s)))
+    _int=${ACTIVITY_WAIT_INTERVAL:-10}
+    [ "$_rest" -ge "$_int" ] || _int=$_rest
+    [ "$_int" -le 0 ] || sleep "$_int"
   done
 }
 
