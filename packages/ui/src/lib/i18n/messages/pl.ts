@@ -2761,6 +2761,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.goal.cancelDialog.confirm': 'Anuluj cel',
   'chat.suggestion.applyAria': 'Użyj sugerowanej wiadomości',
   'chat.suggestion.dismissAria': 'Odrzuć sugestię',
+  'chat.suggestion.optionsAria': 'Sugerowane odpowiedzi',
+  'chat.suggestion.ghost.description': 'Naciśnij {key}, aby wstawić sugerowaną wiadomość: {text}',
   'header.actions.toggleRightSidebarAria': 'Przełącz prawy panel boczny',
   'header.actions.toggleTerminalPanelAria': 'Przełącz panel terminala',
   'header.changes.availableAria': 'Dostępne zmiany',

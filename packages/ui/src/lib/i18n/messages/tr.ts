@@ -1929,6 +1929,8 @@ export const dict = {
   'chat.goal.cancelDialog.confirm': 'Hedefi iptal et',
   'chat.suggestion.applyAria': 'Önerilen mesajı kullan',
   'chat.suggestion.dismissAria': 'Öneriyi kapat',
+  'chat.suggestion.optionsAria': 'Önerilen yanıtlar',
+  'chat.suggestion.ghost.description': 'Önerilen mesajı eklemek için {key} tuşuna basın: {text}',
   'header.actions.toggleTerminalPanelAria': 'Terminal panelini aç/kapat',
   'terminalView.stream.processExitedMessage': '\\r\\n[İşlem sonlandı{exitCodeSegment}{signalSegment}]\\r\\n',
   'terminalView.stream.processExitedWithCode': ', kod: {exitCode}',

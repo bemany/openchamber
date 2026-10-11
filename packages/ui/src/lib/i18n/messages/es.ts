@@ -2028,6 +2028,8 @@ export const dict: Record<I18nKey, string> = {
   "chat.goal.cancelDialog.confirm": "Cancelar objetivo",
   "chat.suggestion.applyAria": "Usar mensaje sugerido",
   "chat.suggestion.dismissAria": "Descartar sugerencia",
+  "chat.suggestion.optionsAria": "Respuestas sugeridas",
+  "chat.suggestion.ghost.description": "Pulsa {key} para insertar el mensaje sugerido: {text}",
   "header.actions.toggleTerminalPanelAria": "Mostrar u ocultar panel de terminal",
   "terminalView.stream.processExitedMessage": "\r\n[Proceso terminado{exitCodeSegment}{signalSegment}]\r\n",
   "terminalView.stream.processExitedWithCode": " con código {exitCode}",

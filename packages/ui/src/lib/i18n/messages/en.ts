@@ -2062,6 +2062,8 @@ export const dict = {
   'chat.goal.cancelDialog.confirm': 'Cancel goal',
   'chat.suggestion.applyAria': 'Use suggested message',
   'chat.suggestion.dismissAria': 'Dismiss suggestion',
+  'chat.suggestion.optionsAria': 'Suggested replies',
+  'chat.suggestion.ghost.description': 'Press {key} to insert the suggested message: {text}',
   'header.actions.toggleTerminalPanelAria': 'Toggle terminal panel',
   'terminalView.stream.processExitedMessage': '\r\n[Process exited{exitCodeSegment}{signalSegment}]\r\n',
   'terminalView.stream.processExitedWithCode': ' with code {exitCode}',

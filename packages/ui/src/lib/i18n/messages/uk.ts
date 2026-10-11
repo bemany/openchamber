@@ -2028,6 +2028,8 @@ export const dict: Record<I18nKey, string> = {
   "chat.goal.cancelDialog.confirm": "Скасувати ціль",
   "chat.suggestion.applyAria": "Використати запропоноване повідомлення",
   "chat.suggestion.dismissAria": "Прибрати пропозицію",
+  "chat.suggestion.optionsAria": "Запропоновані відповіді",
+  "chat.suggestion.ghost.description": "Натисніть {key}, щоб вставити запропоноване повідомлення: {text}",
   "header.actions.toggleTerminalPanelAria": "Перемкнути панель терміналу",
   "terminalView.stream.processExitedMessage": "\r\n[Process exited{exitCodeSegment}{signalSegment}]\r\n",
   "terminalView.stream.processExitedWithCode": " з кодом {exitCode}",

@@ -2037,6 +2037,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.goal.cancelDialog.confirm': '取消目標',
   'chat.suggestion.applyAria': '使用建議的訊息',
   'chat.suggestion.dismissAria': '關閉建議',
+  'chat.suggestion.optionsAria': '建議的回覆',
+  'chat.suggestion.ghost.description': '按 {key} 插入建議的訊息：{text}',
   'header.actions.toggleTerminalPanelAria': '切換終端機面板',
   'terminalView.stream.processExitedMessage': '\r\n[處理程序已結束{exitCodeSegment}{signalSegment}]\r\n',
   'terminalView.stream.processExitedWithCode': '，結束代碼 {exitCode}',

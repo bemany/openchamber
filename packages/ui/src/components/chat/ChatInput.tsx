@@ -62,7 +62,7 @@ import { cn } from "@/lib/utils";
 import { ModelControls } from './ModelControls';
 import { parseAgentMentions } from '@/lib/messages/agentMentions';
 import { CONTEXT_METADATA_KEY, draftFromContextPayload } from '@/lib/messages/contextParts';
-import { shouldSubmitEnter } from './composer/keyboardPolicy';
+import { ghostTextKeyAction, shouldSubmitEnter } from './composer/keyboardPolicy';
 import { getDropdownNavigationKey } from '@/components/ui/dropdown-navigation';
 import { useChatColumnActions, useChatColumnExpandedInput, useChatColumnSession, type ChatColumnSession } from './chatColumnSession';
 import { usePinnedComposerSelection } from './pinnedComposerSelection';
@@ -128,7 +128,7 @@ import { fetchResponseStyleInstruction } from '@/lib/responseStyle';
 import { wrapSystemReminder } from '@/lib/systemReminder';
 import { getSyncMessages } from '@/sync/sync-refs';
 import { useOpenCodeStartupStore } from '@/sync/opencode-startup-gate';
-import { eventMatchesShortcut, getEffectiveShortcutCombo, normalizeCombo } from '@/lib/shortcuts';
+import { eventMatchesShortcut, formatShortcutForDisplay, getEffectiveShortcutCombo, normalizeCombo } from '@/lib/shortcuts';
 import {
     assignImageAttachmentFilenames,
     buildAttachmentCitationText,
@@ -224,6 +224,7 @@ import { LargeTextPasteChoice, type LargeTextPasteChoiceAction } from './compose
 import { LinkedReferenceRow } from './composer/ui/LinkedReferenceRow';
 import { RevertedMessagesStrip } from './RevertedMessagesStrip';
 import { SessionSuggestionChip } from '@/components/chat/SessionSuggestionChip';
+import { useSessionAssistState } from '@/hooks/useSessionAssist';
 import { SessionDoneHintRow } from '@/components/chat/SessionDoneHintRow';
 import { SessionReviewHintRow } from '@/components/chat/SessionReviewHintRow';
 import { BackgroundShellsStrip } from '@/components/chat/BackgroundShellsStrip';
@@ -2420,6 +2421,32 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         void handleSubmitRef.current({ presetText: text });
     }, [columnPinned, configCatalogLoaded, currentModelId, currentProviderId, draftSubmitDraftId, getCurrentInputSnapshot, mailboxTarget, pendingDraftSubmit]);
 
+    // The suggestion row's hiding rules; the ghost text follows them too.
+    const suggestionHidden = hasContent || newSessionDraftOpen || isBtwActive || isBtwPanelVisible || queuedMessages.length > 0 || hasPendingForm;
+    // Ghost text: on layouts with a hardware keyboard, the continuation
+    // suggestion, or else the first reply option, drawn in the empty composer.
+    // Tab accepts it. Typing, pasting or Escape dismisses it for this payload
+    // only (`forMessageID` + `generatedAt`), in this composer only: nothing is
+    // written to the session metadata, and the next payload shows again.
+    const sessionAssist = useSessionAssistState(currentSessionId ?? '', currentSessionDirectoryForSync ?? currentDirectory);
+    const ghostPayloadKey = sessionAssist.assist ? `${sessionAssist.assist.forMessageID}:${sessionAssist.assist.generatedAt}` : '';
+    const [dismissedGhostText, setDismissedGhostText] = React.useState<ReadonlyMap<string, string>>(() => new Map());
+    const ghostCandidate = sessionAssist.suggestion ?? sessionAssist.options[0] ?? null;
+    const ghostTextValue = !isMobile
+        && currentSessionId
+        && ghostCandidate
+        && message.length === 0
+        && !suggestionHidden
+        && inputMode === 'normal'
+        && dismissedGhostText.get(currentSessionId) !== ghostPayloadKey
+        ? ghostCandidate
+        : null;
+    const ghostTextAcceptKey = formatShortcutForDisplay('tab');
+    const dismissGhostText = () => {
+        if (!currentSessionId || !ghostPayloadKey) return;
+        setDismissedGhostText((current) => new Map(current).set(currentSessionId, ghostPayloadKey));
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
         // Early return during IME composition to prevent interference with autocomplete.
         // Uses keyCode === 229 fallback for WebKit where compositionend fires before keydown.
@@ -2428,6 +2455,22 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             return;
         }
         if (largeTextPasteBehavior === 'inline-double-paste') largeTextPasteGesture.keyDown(e);
+
+        // Visible ghost text owns plain Tab and Escape; once it is gone, both
+        // fall through to agent cycling and the Escape branches below.
+        if (ghostTextValue && openAutocomplete === null) {
+            const action = ghostTextKeyAction(e);
+            if (action === 'accept' || action === 'dismiss') {
+                e.preventDefault();
+                e.stopPropagation();
+                if (action === 'accept') applyAssistSuggestion(ghostTextValue);
+                else dismissGhostText();
+                return;
+            }
+            // A typed `!` switches to shell mode without changing the text, so
+            // the change handler would not see it.
+            if (action === 'dismiss-and-continue') dismissGhostText();
+        }
 
         // Enter shell mode before CodeMirror inserts the trigger. Keeping the
         // document unchanged also keeps the caret at the start for the first
@@ -2732,6 +2775,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     }, []);
 
     const handleComposerChange = ({ value, selection, fromPaste, insertedText, fromValueProp }: ComposerChange) => {
+        // Whatever filled the empty composer under the ghost text, typing,
+        // pasting or accepting it, retires it for this payload.
+        if (ghostTextValue && value.length > 0) dismissGhostText();
         if (largeTextPasteBehavior === 'inline-double-paste') {
             largeTextPasteGesture.change({
                 value, selection, fromPaste, insertedText,
@@ -3869,12 +3915,15 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     // The suggested follow-up is the composer's own top row on every surface
     // (inside the mobile pill and the box alike); on mobile the model and
     // agent are its bottom row too, so the surface stays one shape.
-    const suggestionHidden = hasContent || newSessionDraftOpen || isBtwActive || isBtwPanelVisible || queuedMessages.length > 0 || hasPendingForm;
+    // A hardware keyboard gets the continuation as ghost text instead of
+    // the row; reply options stay chips everywhere.
     const suggestionRow = !isBtwActive ? (
         <SessionSuggestionChip
             sessionId={currentSessionId}
-            directory={currentSessionDirectoryForSync ?? currentDirectory}
+            suggestion={sessionAssist.suggestion}
+            options={sessionAssist.options}
             hidden={suggestionHidden}
+            showContinuation={isMobile}
             onApply={applyAssistSuggestion}
         />
     ) : null;
@@ -4375,6 +4424,13 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                                             ? t('chat.chatInput.placeholder.shell')
                                             : t(useCompactChatPlaceholder ? 'chat.chatInput.placeholder.chatCompact' : 'chat.chatInput.placeholder.chat')
                                         : t('chat.chatInput.placeholder.selectSession')}
+                                ghostText={ghostTextValue
+                                    ? {
+                                        text: ghostTextValue,
+                                        hint: ghostTextAcceptKey,
+                                        description: t('chat.suggestion.ghost.description', { text: ghostTextValue, key: ghostTextAcceptKey }),
+                                    }
+                                    : null}
                                 editable={Boolean(currentSessionId || newSessionDraftOpen)}
                                 autoCorrect={composerAutoCorrect({ isMobile })}
                                 autoCapitalize={isMobile ? 'sentences' : 'none'}

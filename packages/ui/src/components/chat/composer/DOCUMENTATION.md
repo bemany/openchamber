@@ -111,6 +111,34 @@ and reloads. It receives the composer's main-session queue target instead of
 resolving the global selection, so a chat pinned in the side panel addresses
 its own queue. It stays visible under the form and permission docks.
 
+The session assist (`packages/web/server/lib/session-assist/DOCUMENTATION.md`)
+writes either one continuation `suggestion` or 2 to 3 reply `options` per turn.
+`ChatInput` reads both once through `useSessionAssistState` and passes them
+down. Reply options are chips in the suggestion row on every layout; a chip
+replaces the composer text with its option and focuses it. The continuation
+is the row's single line only on the mobile layout (`isMobile`). With a
+hardware keyboard (desktop web, Electron, VS Code webview) it is ghost text
+instead, and so is the first reply option, beside its chip. The row's X
+removes `suggestion` and `options` from the session metadata
+(`withoutAssistSuggestions`), so they disappear in every client.
+Nothing here ever sends, answers a question form, or grants a permission.
+
+Ghost text is drawn by `editor/ghostText.ts`, a widget at position 0 that the
+document never contains: `getValue()` stays empty, the placeholder makes way,
+the widget is `aria-hidden`, and the editor carries an `aria-description`
+naming the text and the accept key. It shows under the suggestion row's
+hiding rules plus three of its own: the document is empty (whitespace counts
+as content here), the composer is in normal mode, and the payload was not
+dismissed. `ghostTextKeyAction` in `keyboardPolicy.ts` decides the keys
+while no picker is open: plain Tab inserts the text through the chip's path
+(caret at the end, focused, not sent); Escape dismisses and does nothing
+else, ahead of the expanded-mode Escape; a typed character dismisses and
+types. Any edit that fills the empty composer dismisses too, which covers
+paste. Without visible ghost text Tab keeps its `cycle_agent` meaning, and
+Shift+Tab always does. A dismissal is local to this composer and keyed by
+session and payload (`forMessageID` + `generatedAt`): clearing the text
+does not bring it back, a new payload does, and the metadata is untouched.
+
 `selectComposerQueue` in the submission builder excludes server-scheduled items
 before the composer counts manual content or reads captured send configuration.
 Mixed queues use only ordinary items for manual send; a scheduled-only queue
@@ -938,8 +966,8 @@ quoted code or message stays verbatim.
 
 Tests cover the language, submit assembly, path and drop handling, text splicing,
 large-paste detection, paste-offer invalidation, input-history traversal, the
-mobile comment lifecycle, and the CodeMirror language extension at the
-`EditorState` level. The mobile comment hook also has a Happy DOM integration
+mobile comment lifecycle, the ghost-text keys, and the CodeMirror language and
+ghost-text extensions at the `EditorState` level. The mobile comment hook also has a Happy DOM integration
 suite for the mounted composer's target, stale callbacks, and failed attaches.
 
 Rendering, focus, keyboard behavior, IME and WKWebView are **not covered by
