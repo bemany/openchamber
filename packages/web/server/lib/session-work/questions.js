@@ -77,6 +77,20 @@ const NEXT_STEP = {
   },
 };
 
+/**
+ * Asked with `next_step`, whose wording rules out a turn that waits for the
+ * user. Such a turn may still deserve short reply options, so this question
+ * keeps the suggestion field alive for it without changing the measured
+ * `next_step`. The threshold is a first value, not yet measured.
+ */
+const AWAITS_REPLY = {
+  question: 'Does `answer` end by asking the user to choose, approve, or answer something that a few words can settle?',
+  criteria: {
+    true: 'The last thing `answer` does is ask the user a question with a short answer: pick one of the offered options, approve or decline a proposed step ("Shall I merge?", "A or B?"), or confirm a fact.',
+    false: '`answer` reports the work as done, ends with a summary or an optional offer, asks for information only the user has (a name, a secret, a free-form description), or asks the user to test or check something outside the chat first.',
+  },
+};
+
 /** Open when either passes (measured together). */
 const OPEN_THRESHOLDS = { change: 0.85, towardChange: 0.9 };
 const WRAP_UP_THRESHOLD = 0.8;
@@ -84,6 +98,7 @@ const REVIEW_READY_THRESHOLD = 0.7;
 /** The recap is skipped only when Jev is nearly sure there is nothing to remind. */
 const RECAP_SKIP_BELOW = 0.3;
 const NEXT_STEP_THRESHOLD = 0.5;
+const AWAITS_REPLY_THRESHOLD = 0.5;
 
 const noul = (context, { question, criteria }) => {
   const asked = { type: 'noul', instructions: [context, question] };
@@ -104,7 +119,7 @@ export const buildSendRequest = ({ history, request }) => ({
  * The request Jev reads when a turn ended, or null when nothing is asked.
  * `ask` names the groups: `open` (the session is not in work), `wrapUp` (it
  * is), `reviewReady` (the review offer is on), `recap` and `nextStep` (the
- * assist fields the user has on).
+ * assist fields the user has on; `nextStep` also asks `awaits_reply`).
  */
 export const buildTurnEndRequest = ({ history, request, answer, ask }) => {
   const questions = {};
@@ -115,7 +130,10 @@ export const buildTurnEndRequest = ({ history, request, answer, ask }) => {
   if (ask.wrapUp) questions.wrap_up = noul(TURN_END_CONTEXT, { question: WRAP_UP });
   if (ask.reviewReady) questions.review_ready = noul(TURN_END_CONTEXT, REVIEW_READY);
   if (ask.recap) questions.recap = noul(TURN_END_CONTEXT, RECAP);
-  if (ask.nextStep) questions.next_step = noul(TURN_END_CONTEXT, NEXT_STEP);
+  if (ask.nextStep) {
+    questions.next_step = noul(TURN_END_CONTEXT, NEXT_STEP);
+    questions.awaits_reply = noul(TURN_END_CONTEXT, AWAITS_REPLY);
+  }
   if (Object.keys(questions).length === 0) return null;
   return { state: { history, request, answer }, questions };
 };
@@ -142,14 +160,18 @@ export const decideReviewReady = (answers) => {
 };
 
 /**
- * Which assist fields are worth the Small Model. A field Jev did not answer
- * stays allowed: an unanswered question must not silence the assist.
+ * Which assist fields are worth the Small Model. A question Jev did not answer
+ * counts as yes: an unanswered question must not silence the assist. The
+ * suggestion field covers both a continuation (`next_step`) and reply options
+ * for a turn that waits on a short decision (`awaits_reply`).
  */
 export const decideAssist = (answers) => {
   const recap = answerOf(answers, 'recap');
   const nextStep = answerOf(answers, 'next_step');
+  const awaitsReply = answerOf(answers, 'awaits_reply');
   return {
     recap: recap === null || recap >= RECAP_SKIP_BELOW,
-    suggestion: nextStep === null || nextStep >= NEXT_STEP_THRESHOLD,
+    suggestion: nextStep === null || nextStep >= NEXT_STEP_THRESHOLD
+      || awaitsReply === null || awaitsReply >= AWAITS_REPLY_THRESHOLD,
   };
 };

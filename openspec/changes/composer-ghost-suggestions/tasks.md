@@ -2,10 +2,10 @@
 
 ## 1. Server: reply options
 
-- [ ] 1.1 Extend `buildAssistSystemPrompt` / `buildAssistPrompt` with the `options` field and the three-outcome guidance; verify with new cases in `session-assist` tests (prompt contains options rules only when suggestion is requested).
-- [ ] 1.2 Validate and store `options` in `runtime.js` (trim, 80 chars, script guard, dedupe, 2 to 3, clears suggestion); verify with `runtime.test.js` cases for valid set, too few, duplicates, both returned, setting off.
-- [ ] 1.3 Add Jev `awaits_reply` question and extend `decideAssist`; verify with `session-work` tests (gate allows suggestion on decision, unanswered stays allowed).
-- [ ] 1.4 Update `session-assist/DOCUMENTATION.md` (step 5, payload) and `session-work/DOCUMENTATION.md`; verify by review.
+- [x] 1.1 Extend `buildAssistSystemPrompt` / `buildAssistPrompt` with the `options` field and the three-outcome guidance; verify with new cases in `session-assist` tests (prompt contains options rules only when suggestion is requested).
+- [x] 1.2 Validate and store `options` in `runtime.js` (trim, 80 chars, script guard, dedupe, 2 to 3, clears suggestion); verify with `runtime.test.js` cases for valid set, too few, duplicates, both returned, setting off.
+- [x] 1.3 Add Jev `awaits_reply` question and extend `decideAssist`; verify with `session-work` tests (gate allows suggestion on decision, unanswered stays allowed).
+- [x] 1.4 Update `session-assist/DOCUMENTATION.md` (step 5, payload) and `session-work/DOCUMENTATION.md`; verify by review.
 
 ## 2. UI: payload and state
 

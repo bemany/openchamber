@@ -43,7 +43,48 @@ const idle = (sessionId = 'ses_1') => ({
 afterEach(() => {
   while (runtimes.length > 0) runtimes.pop().stop();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
+
+/**
+ * Runs one generation against a stubbed v2 OpenCode whose last turn asked
+ * `userText` and answered `answerText`, with the Small Model returning
+ * `modelText`. Resolves the payload handed to the store, or null.
+ */
+const generateOnce = async ({ modelText, targets = { recap: true, suggestion: true }, userText = 'Do the thing', answerText = 'Shall I merge it?' }) => {
+  const persistSessionAssist = vi.fn(async () => undefined);
+  const records = [
+    { id: 'msg_idle', type: 'idle', outcome: 'succeeded' },
+    { id: 'msg_a', type: 'assistant', content: [{ type: 'text', text: answerText }], finish: 'stop', time: { completed: 2 }, model: { providerID: 'p', id: 'm' } },
+    { id: 'msg_u', type: 'user', text: userText },
+  ];
+  vi.stubGlobal('fetch', vi.fn(async (input) => {
+    const url = new URL(String(input));
+    let body;
+    if (url.pathname === '/api/session/ses_1') body = { data: { id: 'ses_1', location: { directory: '/repo' } } };
+    else if (url.pathname === '/api/session/ses_1/message') body = { data: records.slice(0, Number(url.searchParams.get('limit'))), cursor: {} };
+    else throw new Error(`unexpected ${url.pathname}`);
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  }));
+  const generateSmallModelText = vi.fn(async () => ({ text: modelText }));
+  const { runtime } = makeRuntime({
+    persistSessionAssist,
+    getTargets: () => targets,
+    buildOpenCodeUrl: (fetchPath) => `http://opencode.test${fetchPath}`,
+    getSmallModelService: async () => ({
+      describeSmallModel: async () => ({ inputCharBudget: 20_000 }),
+      generateSmallModelText,
+    }),
+  });
+  runtime.processPayload(idle());
+  for (let i = 0; i < 30 && generateSmallModelText.mock.calls.length === 0; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  for (let i = 0; i < 10 && persistSessionAssist.mock.calls.length === 0; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return { payload: persistSessionAssist.mock.calls[0]?.[2] ?? null, generateSmallModelText };
+};
 
 describe('session assist runtime', () => {
   it('does no work and reaches no service while no assist store is injected', async () => {
@@ -225,4 +266,53 @@ describe('session assist runtime', () => {
     // above suppresses.
     expect(buildOpenCodeUrl).toHaveBeenCalled();
   });
+
+  it('stores two or three reply options and no continuation for a decision turn', async () => {
+    const { payload } = await generateOnce({
+      modelText: '{"recap":"Fixed the header.","suggestion":"Merge it.","options":["  Yes, merge it ","No, wait","yes, merge it","Show me the diff first","Merge and release"]}',
+    });
+
+    expect(payload).toMatchObject({
+      recap: 'Fixed the header.',
+      suggestion: '',
+      options: ['Yes, merge it', 'No, wait', 'Show me the diff first'],
+    });
+  });
+
+  it('drops a set that has fewer than two valid options after validation', async () => {
+    const { payload } = await generateOnce({
+      modelText: JSON.stringify({ recap: 'Fixed the header.', suggestion: '', options: ['Yes', 'yes', 'x'.repeat(81), 42] }),
+    });
+
+    expect(payload).toMatchObject({ recap: 'Fixed the header.', suggestion: '', options: [] });
+  });
+
+  it('drops options in a script the user did not write before counting them', async () => {
+    const { payload } = await generateOnce({
+      userText: 'Please fix the header',
+      modelText: JSON.stringify({ recap: 'Fixed the header.', suggestion: 'Continue with the footer.', options: ['Yes, merge', 'Да, сливай'] }),
+    });
+
+    expect(payload).toMatchObject({ suggestion: 'Continue with the footer.', options: [] });
+  });
+
+  it('writes nothing when the model returns only invalid options and no other field', async () => {
+    const { payload } = await generateOnce({
+      targets: { recap: false, suggestion: true },
+      modelText: JSON.stringify({ suggestion: '', options: ['Only one'] }),
+    });
+
+    expect(payload).toBeNull();
+  });
+
+  it('neither asks for nor stores options with suggestions off', async () => {
+    const { payload, generateSmallModelText } = await generateOnce({
+      targets: { recap: true, suggestion: false },
+      modelText: JSON.stringify({ recap: 'Fixed the header.', suggestion: 'Merge it.', options: ['Yes, merge it', 'No, wait'] }),
+    });
+
+    expect(generateSmallModelText.mock.calls[0][0].system).not.toContain('options');
+    expect(payload).toMatchObject({ recap: 'Fixed the header.', suggestion: '', options: [] });
+  });
 });
+
