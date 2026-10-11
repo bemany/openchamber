@@ -13,15 +13,19 @@ Betriebsskripte für den Builder (xcode-builder), auf dem der LaunchAgent
 
 ## Aufruf
 
-- `--check` oder `CHECK_ONLY=1`: Wird vor allem anderen behandelt, meldet nur die Aktivität und endet
-  ohne Seiteneffekte (Exit 0 = ruhig, 1 = aktiv), auch zusammen mit anderen Argumenten.
+- `--check` oder `CHECK_ONLY=1`: Wird vor allem anderen behandelt (auch vor dem Aufräum-Trap), meldet
+  nur die Aktivität und endet ohne Schreibzugriffe (Exit 0 = ruhig, 1 = aktiv), auch zusammen mit
+  anderen Argumenten.
 - `FORCE=1`: Schaltet trotz Aktivität um (beide Prüfungen), listet sie aber trotzdem auf.
 - `--restart` ist die interne, abgekoppelte Phase. Sie läuft nur mit dem Einmal-Nachweis aus Phase 1:
-  eine Datei mit Zufallstoken in einem per `mktemp -d` angelegten 0700-Verzeichnis
-  (`$TMPDIR/openchamber-switch.*`). Verzeichnis und Token gehen per Umgebung, nicht über argv, an
-  Phase 2. Phase 2 entfernt die Variablen sofort, verbraucht die Datei per `mv` (gelingt nur einmal),
-  löscht das Verzeichnis und tut erst danach etwas. Direkte Aufrufe, selbst gesetzte Werte, falscher
-  Ort, falsche Rechte und Wiederholungen werden abgewiesen. Das schützt vor versehentlichen Aufrufen,
+  eine Datei mit Zufallstoken in einem per `mktemp -d` angelegten 0700-Verzeichnis direkt unter dem
+  (kanonisierten) `$TMPDIR` (`openchamber-switch.*`). Verzeichnis und Token gehen per Umgebung, nicht
+  über argv, an Phase 2. Beide Skripte übernehmen sie als allererstes in nicht exportierte Variablen und
+  entfernen sie aus der Umgebung, kein Kindprozess (auch nicht `launchctl`) sieht sie. Phase 2 akzeptiert
+  nur ein Verzeichnis an genau diesem Ort, das nur die Datei `token` enthält, verbraucht sie per `mv`
+  (gelingt nur einmal), löscht nur diese Datei, dann das leere Verzeichnis (`rmdir`), und tut erst danach
+  etwas. Direkte Aufrufe, selbst gesetzte Werte, falscher Ort, falsche Rechte, fremde Dateien und
+  Wiederholungen werden abgewiesen; fremde Verzeichnisse bleiben unangetastet. Das schützt vor versehentlichen Aufrufen,
   ist aber keine Sicherheitsgrenze: Wer als derselbe Benutzer den Nachweis bewusst nachbaut, kommt durch.
 - `ACTIVITY_IGNORE_SESSION=<ses_…>`: Aufruf aus einer Agent-Session, siehe unten.
 
@@ -29,7 +33,7 @@ Ablauf:
 1. Phase 1 prüft die Voraussetzungen. Läuft die Zielversion schon (`cli.js serve` mit `--port 3000`),
    gleicht sie nur Sicherung/Startskript an und endet mit Exit 0, ohne Aktivitätsprüfung und Neustart.
 2. Sonst Aktivitätsprüfung; bei Aktivität Abbruch, bevor Sicherung oder Startskript angefasst werden.
-3. Sicherung anlegen, Phase 2 abgekoppelt (`nohup`) starten.
+3. Sicherung anlegen, Phase 2 abgekoppelt (`nohup`) starten; Phase 1 kehrt sofort zurück.
 4. Phase 2 prüft die Aktivität **ein zweites Mal** (ohne Ausnahmen), schreibt erst danach das
    Startskript um und ruft `launchctl kickstart -k`. Ist jetzt etwas aktiv: kein Neustart,
    Startskript unverändert (nur die Sicherung bleibt, sie schadet nicht), Grund im Log.
@@ -50,14 +54,18 @@ ACTIVITY_IGNORE_SESSION=ses_… sh ~/Projects/openchamber-upstream/switch-to-for
 - Phase 1 nimmt diese Session und alle Vorfahren (`parent_id`-Kette) von der Live- und der
   120-s-Regel aus und listet sie als „ignoriert (Aufrufer)“. Alles andere (andere Sessions, Kind-Sessions
   der eigenen, xcodebuild/simctl) blockiert weiter.
-- Phase 2 wartet, bis diese Sessions nicht mehr live laufen (`ACTIVITY_WAIT_TIMEOUT`, Default 900 s,
-  Abfrage alle `ACTIVITY_WAIT_INTERVAL` = 10 s), wartet dann `ACTIVITY_RECENT_SECONDS` (120 s) wegen
-  ihres eigenen `time_updated` und prüft danach **ohne** Ausnahme. Zeitüberschreitung: kein Neustart,
-  Meldung im Log. Der Agent sollte seinen Zug also zügig beenden; der Neustart folgt erst, wenn auch
+- Phase 2 wartet, bis diese Sessions nicht mehr live laufen (Abfrage alle `ACTIVITY_WAIT_INTERVAL` =
+  10 s), wartet dann `ACTIVITY_SETTLE_SECONDS` (Default `ACTIVITY_RECENT_SECONDS` = 120 s) wegen ihres
+  eigenen `time_updated` und fragt erneut. Läuft eine davon wieder (z. B. der Lead, der nach dem
+  Subagent-Ergebnis aufwacht), geht es zurück in die Warteschleife. Erst wenn sie auch nach dem Nachlauf
+  ruhig sind, prüft Phase 2 **ohne** Ausnahme. Gesamt-Timeout `ACTIVITY_WAIT_TIMEOUT` (Default 900 s,
+  inklusive Nachlauf): kein Neustart, Meldung im Log. Der Agent sollte seinen Zug also zügig beenden; der Neustart folgt erst, wenn auch
   der Lead fertig ist.
 - Eigene Session-ID finden: in OpenChamber (Session-Info) oder in der DB über den Titel:
   `sqlite3 -readonly ~/.local/share/opencode/opencode.db "select id, title from session_v2 order by time_updated desc limit 5"`.
-- Unbekannte ID: nimmt nichts aus (Selbstblockade statt Lücke). Ungültige Zeichen: blockiert.
+- ID nicht in der DB (z. B. Tippfehler): Ausgenommen wird nur genau diese ID, ohne Vorfahren. Die echte
+  eigene Session und ihre Eltern blockieren dann weiter (Selbstblockade statt Lücke). Ungültige Zeichen
+  in der ID: blockiert.
 - `FORCE=1` wirkt wie bisher: kein Warten, Aktivität wird nur gelistet.
 
 ## Aktivitätsregel (fail-closed)

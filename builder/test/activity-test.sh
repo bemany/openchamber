@@ -36,7 +36,7 @@ cat > "$MOCK/env" <<'EOF'
 echo "/x/opencode serve --port 4096 HOME=/x OPENCODE_SERVER_PASSWORD=$(cat "$MOCK/pw") TERM=dumb"
 EOF
 # launchctl und Health-curl für die Skripte
-printf '#!/bin/sh\necho "$*" >> "$MOCK/launchctl.log"\n' > "$MOCK/launchctl"
+printf '#!/bin/sh\necho "$*" >> "$MOCK/launchctl.log"\nenv | grep PROOF > "$MOCK/launchctl.env" || true\n' > "$MOCK/launchctl"
 printf '#!/bin/sh\nprintf 200\n' > "$MOCK/health"
 chmod +x "$MOCK"/*
 export MOCK
@@ -318,10 +318,11 @@ NPMCLI="$TMP/npm/bin/cli.js"
 cat > "$MOCK/live" <<'EOF'
 #!/bin/sh
 n=$(( $(cat "$MOCK/live.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$MOCK/live.n"
+[ ! -f "$MOCK/live.sleep.$n" ] || sleep "$(cat "$MOCK/live.sleep.$n")"
 if [ -f "$MOCK/live.$n" ]; then cat "$MOCK/live.$n"; else cat "$MOCK/live.default"; fi
 EOF
 chmod +x "$MOCK/live"
-live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK/live.n"; printf '%s' "$1" | tr ' ' '\n' > "$MOCK/live.default"; shift
+live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK"/live.sleep.* "$MOCK/live.n"; printf '%s' "$1" | tr ' ' '\n' > "$MOCK/live.default"; shift
   k=1; for v in "$@"; do printf '%s' "$v" | tr ' ' '\n' > "$MOCK/live.$k"; k=$((k + 1)); done; }
 
 script_env() {
@@ -384,6 +385,24 @@ $OUT"
   result "$S: --restart, falsches Token -> abgewiesen, Nachweis verbraucht" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(has 'passt nicht')" "$([ ! -d "$F" ] && echo 1)")" "rc=$RC
 $OUT"
 
+  # --check ist schreibfrei: eine Datei mit dem TMP-Namen ($START.tmp.<pid>) bleibt erhalten
+  db_s2; ps_idle; live_seq ''; reset_start "$FROM"
+  OUT=$(script_env sh -c 'touch "$1.tmp.$$"; exec sh "$2" --check' _ "$TMP/start/OpenChamber" "$SP" 2>&1); RC=$?
+  result "$S: --check lässt Datei mit TMP-Namen stehen" "$(all "$([ $RC = 0 ] && echo 1)" "$(noTmp | tr 1 2 | tr 0 1)")" "rc=$RC
+$(ls "$TMP/start")
+$OUT"
+
+  # Fremde Verzeichnisse openchamber-switch.* bleiben unangetastet
+  F="$TMP/elsewhere/openchamber-switch.abc"; mkdir -p "$F"; chmod 700 "$F"; echo abc > "$F/token"; echo x > "$F/other"
+  OUT=$(script_env SWITCH_PROOF_DIR="$F" SWITCH_PROOF_TOKEN=abc sh "$SP" --restart 0 2>&1); RC=$?
+  result "$S: fremdes 0700-Verzeichnis an anderem Ort -> abgewiesen, unangetastet" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'falschen Ort')" "$([ -f "$F/token" ] && [ -f "$F/other" ] && echo 1)" "$(called | tr 1 2 | tr 0 1)")" "rc=$RC
+$OUT"
+  F="$TMP/tmpdir/openchamber-switch.full"; mkdir -p "$F"; chmod 700 "$F"; echo abc > "$F/token"; echo x > "$F/other"
+  OUT=$(script_env SWITCH_PROOF_DIR="$F" SWITCH_PROOF_TOKEN=abc sh "$SP" --restart 0 2>&1); RC=$?
+  result "$S: Nachweis-Verzeichnis mit fremder Datei -> abgewiesen, unangetastet" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'nicht leer')" "$([ -f "$F/token" ] && [ -f "$F/other" ] && echo 1)")" "rc=$RC
+$OUT"
+  rm -rf "$F" "$TMP/elsewhere"
+
   # Echter Nachweis gilt genau einmal; Wiederholung mit denselben Werten scheitert
   db_s2; ps_idle; live_seq ''; reset_start "$FROM"
   PRF=$(TMPDIR="$TMP/tmpdir"; die() { exit 1; }; . "$HERE/../lib/phase.sh"; phase_proof_create; echo "$PROOF_DIR $PROOF_TOKEN")
@@ -421,7 +440,7 @@ $(cat "$TMP/phase2.log" 2>/dev/null)"
   # Wechsel ruhig -> aktiv zwischen beiden Prüfungen: kein Neustart
   db_s2; ps_idle; live_seq 's2' ''; reset_start "$FROM"
   OUT=$(script_env sh "$SP" 2>&1); RC=$?
-  result "$S: ruhig -> aktiv vor Neustart -> kein Neustart" "$(all "$([ $RC = 0 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$(loghas 'zweiten Prüfung: kein Neustart')" "$(noproof)")" "rc=$RC
+  result "$S: ruhig -> aktiv vor Neustart -> kein Neustart, Exit 1" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$(loghas 'zweiten Prüfung: kein Neustart')" "$(noproof)")" "rc=$RC
 $OUT
 $(cat "$TMP/phase2.log" 2>/dev/null)"
 
@@ -438,17 +457,45 @@ $(cat "$TMP/phase2.log" 2>/dev/null)"
 $OUT
 $(cat "$TMP/phase2.log" 2>/dev/null)"
 
+  # Aufrufer wacht nach dem Nachlauf wieder auf (Lead nach Subagent): weiter warten, dann Neustart
+  ign_db; ps_idle; live_seq '' 'me' '' 'root' 'root' '' ''; reset_start "$FROM"
+  OUT=$(script_env ACTIVITY_IGNORE_SESSION=me sh "$SP" 2>&1); RC=$?
+  result "$S: Aufrufer wieder live nach Nachlauf -> weiter warten, dann Neustart" "$(all "$([ $RC = 0 ] && echo 1)" "$(loghas 'wieder live: root')" "$(loghas 'auch nach 1 s nicht live')" "$(called)")" "rc=$RC
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+  ign_db; ps_idle; live_seq 'root' 'me' ''; reset_start "$FROM"
+  OUT=$(script_env ACTIVITY_IGNORE_SESSION=me ACTIVITY_WAIT_TIMEOUT=3 sh "$SP" 2>&1); RC=$?
+  result "$S: Aufrufer bleibt nach Nachlauf live -> Gesamt-Timeout, kein Neustart" "$(all "$([ $RC = 1 ] && echo 1)" "$(loghas 'wieder live')" "$(loghas 'Zeitüberschreitung')" "$(called | tr 1 2 | tr 0 1)")" "rc=$RC
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+
   # Aufrufer-Ausnahme mit Zeitüberschreitung: kein Neustart
   ign_db; ps_idle; live_seq 'me' ; reset_start "$FROM"
   OUT=$(script_env ACTIVITY_IGNORE_SESSION=me ACTIVITY_WAIT_TIMEOUT=2 sh "$SP" 2>&1); RC=$?
-  result "$S: Ignore + Zeitüberschreitung -> kein Neustart" "$(all "$([ $RC = 0 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$(loghas 'Zeitüberschreitung')" "$(loghas 'nicht rechtzeitig fertig')")" "rc=$RC
+  result "$S: Ignore + Zeitüberschreitung -> kein Neustart, Exit 1" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$(loghas 'Zeitüberschreitung')" "$(loghas 'nicht rechtzeitig fertig')")" "rc=$RC
 $(cat "$TMP/phase2.log" 2>/dev/null)"
 
   # Aufrufer-Ausnahme, aber nach dem Warten ist eine andere Session aktiv
   ign_db; ps_idle; live_seq 'other' 'me' 'me'; reset_start "$FROM"
   OUT=$(script_env ACTIVITY_IGNORE_SESSION=me sh "$SP" 2>&1); RC=$?
-  result "$S: Ignore, danach andere Session aktiv -> kein Neustart" "$(all "$([ $RC = 0 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(loghas 'BLOCK  Session other')")" "rc=$RC
+  result "$S: Ignore, danach andere Session aktiv -> kein Neustart, Exit 1" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(loghas 'BLOCK  Session other')")" "rc=$RC
 $(cat "$TMP/phase2.log" 2>/dev/null)"
+done
+
+# Echter nohup-Pfad (ohne SWITCH_SYNC): Phase 1 kehrt sofort zurück, Phase 2 läuft
+# abgekoppelt (zweite Live-Abfrage dauert 2 s), verbraucht den Nachweis, und
+# launchctl sieht keine Nachweis-Variablen.
+for S in switch-to-fork.sh switch-to-npm.sh; do
+  SP="$HERE/../$S"
+  if [ "$S" = switch-to-fork.sh ]; then FROM=$NPMCLI; else FROM=$FORKCLI; fi
+  db_s2; ps_idle; live_seq ''; echo 2 > "$MOCK/live.sleep.2"; reset_start "$FROM"; rm -f "$MOCK/launchctl.env"
+  T0=$(date +%s)
+  OUT=$(script_env SWITCH_SYNC=0 sh "$SP" 2>&1); RC=$?
+  T1=$(date +%s)
+  EARLY=$(called)
+  i=0; while [ $i -lt 30 ] && ! grep -qF -- '--- Ende' "$TMP/phase2.log" 2>/dev/null; do sleep 1; i=$((i + 1)); done
+  result "$S: nohup-Pfad: Phase 1 sofort zurück, Phase 2 abgekoppelt" "$(all "$([ $RC = 0 ] && echo 1)" "$([ $((T1 - T0)) -lt 2 ] && echo 1)" "$([ "$EARLY" = 0 ] && echo 1)" "$(has 'Neustart läuft abgekoppelt')" "$(called)" "$(loghas '--- Ende')")" "rc=$RC dauer=$((T1 - T0)) früh=$EARLY
+$OUT
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+  result "$S: nohup-Pfad: Nachweis verbraucht, keine Nachweis-Variablen bei launchctl" "$(all "$(noproof)" "$([ -f "$MOCK/launchctl.env" ] && [ ! -s "$MOCK/launchctl.env" ] && echo 1)")" "$(ls -A "$TMP/tmpdir"; cat "$MOCK/launchctl.env" 2>/dev/null | sed 's/=.*/=<…>/')"
 done
 
 # switch-to-npm.sh: Startskript fehlt -> sauberer Abbruch vor sed, keine Temp-Datei

@@ -13,6 +13,12 @@
 # deshalb laufen zweite Aktivitätsprüfung, Wiederherstellen des Startskripts,
 # Neustart und Prüfung abgekoppelt (interne Phase --restart, nur mit
 # Einmal-Nachweis) nach $LOG.
+
+# Nachweis für die interne Phase als allererstes aus der Umgebung nehmen
+# (nicht exportiert weiterführen), damit kein Kindprozess ihn sieht.
+_PROOF_DIR=${SWITCH_PROOF_DIR:-}
+_PROOF_TOKEN=${SWITCH_PROOF_TOKEN:-}
+unset SWITCH_PROOF_DIR SWITCH_PROOF_TOKEN
 set -eu
 
 FORK_CLI="${SWITCH_RELEASE:-$HOME/Projects/openchamber-release}/packages/web/bin/cli.js"
@@ -23,8 +29,6 @@ SERVICE="gui/$(id -u)/dev.openchamber.web"
 ERRLOG="${SWITCH_ERRLOG:-$HOME/Library/Logs/OpenChamber/startup.err.log}"
 LAUNCHCTL="${SWITCH_LAUNCHCTL:-launchctl}"
 CURL="${SWITCH_CURL:-curl}"
-TMP="$START.tmp.$$"
-trap 'rm -f "$TMP"' EXIT
 # Verzeichnis des Skripts (auch über Symlink aufgerufen), für lib/
 SELF="$0"
 while [ -L "$SELF" ]; do
@@ -47,6 +51,10 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
   if activity_check; then exit 0; fi
   exit 1
 fi
+
+# Temp-Datei für das Startskript; Trap erst hier, damit --check nichts anfasst
+TMP="$START.tmp.$$"
+trap 'rm -f "$TMP"' EXIT
 
 # Startskript wiederherstellen: bevorzugt aus der Sicherung, sonst Pfad zurücktauschen
 restore_start() {

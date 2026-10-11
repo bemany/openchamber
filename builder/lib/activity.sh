@@ -42,6 +42,7 @@
 #                              (Default: "simctl list", das serve-sim nur lesend pollt)
 #   ACTIVITY_WAIT_TIMEOUT      Sekunden für activity_wait_ignored, Default 900
 #   ACTIVITY_WAIT_INTERVAL     Sekunden zwischen zwei Abfragen beim Warten, Default 10
+#   ACTIVITY_SETTLE_SECONDS    Nachlauf nach dem Ende der Aufrufer, Default ACTIVITY_RECENT_SECONDS
 #   ACTIVITY_TAG               Präfix der Ausgabezeilen
 
 ACTIVITY_DB="${ACTIVITY_DB:-$HOME/.local/share/opencode/opencode.db}"
@@ -182,32 +183,52 @@ activity_ignored_ids() {
   printf '%s\n' "$_anc"
 }
 
-# Wartet, bis keine der ausgenommenen Sessions mehr live läuft. 0 = beendet,
-# 1 = Zeitüberschreitung oder IDs nicht ermittelbar. Live-Status nicht
+# Welche der ausgenommenen Sessions ($1, eine pro Zeile) laufen gerade live?
+# Ausgabe: IDs mit Leerzeichen getrennt (leer = keine). Exit 1 = Live-Status
+# nicht verfügbar (Grund auf stdout).
+activity_ignored_live() {
+  _wps=$(eval "$ACTIVITY_PS_CMD") || _wps=
+  _wlive=$(activity_live "$_wps") || { printf '%s' "$_wlive" | tail -n 1; return 1; }
+  printf '%s\n' "$_wlive" | awk -v ids="$(printf '%s' "$1" | tr '\n' ' ')" '
+    BEGIN { n = split(ids, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 }
+    ($0 in want) { printf "%s ", $0 }'
+}
+
+# Wartet, bis keine der ausgenommenen Sessions mehr live läuft und das auch nach
+# ACTIVITY_SETTLE_SECONDS (Default ACTIVITY_RECENT_SECONDS, wegen ihres eigenen
+# time_updated) noch so ist. Wacht eine wieder auf (Lead nach Subagent), geht es
+# zurück in die Warteschleife. 0 = fertig, 1 = Gesamt-Timeout
+# (ACTIVITY_WAIT_TIMEOUT) oder IDs nicht ermittelbar. Live-Status nicht
 # verfügbar zählt als "läuft noch".
 activity_wait_ignored() {
   _ids=$(activity_ignored_ids) || { activity_say "$_ids"; return 1; }
-  _deadline=$(($(date +%s) + ${ACTIVITY_WAIT_TIMEOUT:-900}))
+  _timeout=${ACTIVITY_WAIT_TIMEOUT:-900}
+  _settle=${ACTIVITY_SETTLE_SECONDS:-$ACTIVITY_RECENT_SECONDS}
+  _deadline=$(($(date +%s) + _timeout))
   _last=
-  activity_say "Warte, bis die Aufrufer-Sessions fertig sind: $(printf '%s' "$_ids" | tr '\n' ' ')(höchstens ${ACTIVITY_WAIT_TIMEOUT:-900} s)"
+  activity_say "Warte, bis die Aufrufer-Sessions fertig sind: $(printf '%s' "$_ids" | tr '\n' ' ')(höchstens $_timeout s)"
   while :; do
-    _wps=$(eval "$ACTIVITY_PS_CMD") || _wps=
-    if _wlive=$(activity_live "$_wps"); then
-      _still=$(printf '%s\n' "$_wlive" | awk -v ids="$(printf '%s' "$_ids" | tr '\n' ' ')" '
-        BEGIN { n = split(ids, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 }
-        ($0 in want) { printf "%s ", $0 }')
+    if _still=$(activity_ignored_live "$_ids"); then
       if [ -z "$_still" ]; then
-        activity_say "Aufrufer-Sessions laufen nicht mehr"
-        return 0
+        activity_say "Aufrufer-Sessions laufen nicht mehr, warte $_settle s"
+        sleep "$_settle"
+        if _still=$(activity_ignored_live "$_ids") && [ -z "$_still" ]; then
+          activity_say "Aufrufer-Sessions auch nach $_settle s nicht live"
+          return 0
+        fi
+        activity_say "Aufrufer-Sessions wieder live: ${_still:-Live-Status nicht verfügbar}, warte weiter"
+        _last=
+        _now_msg=
+      else
+        _now_msg="läuft noch: $_still"
       fi
-      _now_msg="läuft noch: $_still"
     else
-      _now_msg="Live-Status nicht verfügbar: $(printf '%s' "$_wlive" | tail -n 1)"
+      _now_msg="Live-Status nicht verfügbar: $_still"
     fi
-    [ "$_now_msg" = "$_last" ] || activity_say "$_now_msg"
+    [ -z "$_now_msg" ] || [ "$_now_msg" = "$_last" ] || activity_say "$_now_msg"
     _last=$_now_msg
     if [ "$(date +%s)" -ge "$_deadline" ]; then
-      activity_say "Zeitüberschreitung nach ${ACTIVITY_WAIT_TIMEOUT:-900} s"
+      activity_say "Zeitüberschreitung nach $_timeout s"
       return 1
     fi
     sleep "${ACTIVITY_WAIT_INTERVAL:-10}"

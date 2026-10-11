@@ -13,6 +13,12 @@
 # Instanz. Laufende Agent-Züge brechen ab. Deshalb laufen zweite Aktivitäts-
 # prüfung, Umschreiben des Startskripts, Neustart und Prüfung abgekoppelt per
 # nohup (interne Phase --restart, nur mit Einmal-Nachweis) und schreiben nach $LOG.
+
+# Nachweis für die interne Phase als allererstes aus der Umgebung nehmen
+# (nicht exportiert weiterführen), damit kein Kindprozess ihn sieht.
+_PROOF_DIR=${SWITCH_PROOF_DIR:-}
+_PROOF_TOKEN=${SWITCH_PROOF_TOKEN:-}
+unset SWITCH_PROOF_DIR SWITCH_PROOF_TOKEN
 set -eu
 
 RELEASE="${SWITCH_RELEASE:-$HOME/Projects/openchamber-release}"
@@ -25,8 +31,6 @@ SERVICE="gui/$(id -u)/dev.openchamber.web"
 ERRLOG="${SWITCH_ERRLOG:-$HOME/Library/Logs/OpenChamber/startup.err.log}"
 LAUNCHCTL="${SWITCH_LAUNCHCTL:-launchctl}"
 CURL="${SWITCH_CURL:-curl}"
-TMP="$START.tmp.$$"
-trap 'rm -f "$TMP"' EXIT
 # Verzeichnis des Skripts (auch über Symlink aufgerufen), für lib/
 SELF="$0"
 while [ -L "$SELF" ]; do
@@ -49,6 +53,10 @@ if [ "${CHECK_ONLY:-0}" = "1" ]; then
   if activity_check; then exit 0; fi
   exit 1
 fi
+
+# Temp-Datei für das Startskript; Trap erst hier, damit --check nichts anfasst
+TMP="$START.tmp.$$"
+trap 'rm -f "$TMP"' EXIT
 
 # Startskript auf den Fork umschreiben (nur der cli.js-Pfad), atomar per mv
 rewrite_start() {
