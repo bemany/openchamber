@@ -18,23 +18,24 @@ export interface SessionAssistPayload {
 const OPTION_CHAR_LIMIT = 80;
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 3;
-const replyOptionsSchema = z.array(z.string());
+const replyOptionSchema = z.string();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
 /**
- * The server's option rules, applied again to what the metadata holds: an
- * entry that is not a string makes the whole set malformed, the rest are
- * trimmed, and empty, overlong or case-insensitively repeated entries drop.
+ * The server's option rules, applied again to what the metadata holds: each
+ * entry is checked on its own, so one that is not a string, empty, overlong or
+ * a case-insensitive repeat drops alone. Fewer than two survivors are no set.
  */
 function readReplyOptions(value: unknown): string[] {
-  const parsed = replyOptionsSchema.safeParse(value);
-  if (!parsed.success) return [];
+  if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   const kept: string[] = [];
-  for (const entry of parsed.data) {
-    const text = entry.trim();
+  for (const entry of value) {
+    const parsed = replyOptionSchema.safeParse(entry);
+    if (!parsed.success) continue;
+    const text = parsed.data.trim();
     const key = text.toLocaleLowerCase();
     if (!text || text.length > OPTION_CHAR_LIMIT || seen.has(key)) continue;
     seen.add(key);

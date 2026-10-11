@@ -48,10 +48,12 @@ describe('getCurrentSessionAssist', () => {
       .toBeNull();
   });
 
-  test('a malformed or too small option set is no option set', () => {
-    const malformed = getCurrentSessionAssist(session({ created: 1, updated: 200, idle: 100 }, { suggestion: 'Run the tests', options: ['Yes', 2, 'No'], generatedAt: 160 }));
-    expect(malformed?.options).toEqual([]);
-    expect(malformed?.suggestion).toBe('Run the tests');
+  test('a malformed entry drops alone, and too few survivors are no option set', () => {
+    const mixed = getCurrentSessionAssist(session({ created: 1, updated: 200, idle: 100 }, { suggestion: 'Run the tests', options: ['Yes', 2, 'No'], generatedAt: 160 }));
+    expect(mixed?.options).toEqual(['Yes', 'No']);
+    const tooFew = getCurrentSessionAssist(session({ created: 1, updated: 200, idle: 100 }, { suggestion: 'Run the tests', options: ['Yes', 2], generatedAt: 160 }));
+    expect(tooFew?.options).toEqual([]);
+    expect(tooFew?.suggestion).toBe('Run the tests');
     const single = getCurrentSessionAssist(session({ created: 1, updated: 200, idle: 100 }, { recap: '', options: ['Yes', 'YES'], generatedAt: 160 }));
     expect(single).toBeNull();
   });
