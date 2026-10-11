@@ -1,3 +1,4 @@
+import { isolateHistory } from '@codemirror/commands';
 import type { EditorState, TransactionSpec } from '@codemirror/state';
 
 /**
@@ -31,3 +32,14 @@ export const replaceWithCaret = (
     const head = caret ? clamp(caret.head) : anchor;
     return { changes, selection: { anchor, head } };
 };
+
+/**
+ * Replace the whole document as one undo step of its own, caret at the end.
+ * Without the isolation CodeMirror's history joins it with typing that follows
+ * at once, and one undo removes both.
+ */
+export const replaceAllAsOwnStep = (state: EditorState, insert: string): TransactionSpec => ({
+    ...replaceWithCaret(state, 0, state.doc.length, insert),
+    annotations: isolateHistory.of('full'),
+    userEvent: 'input',
+});

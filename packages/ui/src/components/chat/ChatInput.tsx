@@ -62,7 +62,8 @@ import { cn } from "@/lib/utils";
 import { ModelControls } from './ModelControls';
 import { parseAgentMentions } from '@/lib/messages/agentMentions';
 import { CONTEXT_METADATA_KEY, draftFromContextPayload } from '@/lib/messages/contextParts';
-import { ghostTextKeyAction, shouldSubmitEnter } from './composer/keyboardPolicy';
+import { shouldSubmitEnter } from './composer/keyboardPolicy';
+import { ghostTextKeyAction, visibleGhostText, withGhostTextDismissed, type GhostTextDismissals } from './composer/state/ghostText';
 import { getDropdownNavigationKey } from '@/components/ui/dropdown-navigation';
 import { useChatColumnActions, useChatColumnExpandedInput, useChatColumnSession, type ChatColumnSession } from './chatColumnSession';
 import { usePinnedComposerSelection } from './pinnedComposerSelection';
@@ -73,7 +74,7 @@ import { useSessionActivity } from '@/hooks/useSessionActivity';
 import { toast } from '@/components/ui';
 // useMessageStore removed — messages now come from sync system
 import { isVSCodeRuntime } from '@/lib/desktop';
-import { useTabletLayout } from '@/lib/device';
+import { useDeviceInfo, useTabletLayout } from '@/lib/device';
 import { useHardwareKeyboard } from '@/lib/hardwareKeyboard';
 import { isCapacitorApp } from '@/lib/platform';
 import { isIMECompositionEvent } from '@/lib/ime';
@@ -2425,27 +2426,31 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const suggestionHidden = hasContent || newSessionDraftOpen || isBtwActive || isBtwPanelVisible || queuedMessages.length > 0 || hasPendingForm;
     // Ghost text: on layouts with a hardware keyboard, the continuation
     // suggestion, or else the first reply option, drawn in the empty composer.
-    // Tab accepts it. Typing, pasting or Escape dismisses it for this payload
-    // only (`forMessageID` + `generatedAt`), in this composer only: nothing is
+    // Tab accepts it. Taking it, typing, pasting or Escape uses up this payload
+    // (`forMessageID` + `generatedAt`) in this composer only: nothing is
     // written to the session metadata, and the next payload shows again.
+    // Phones and touch tablets keep the suggestion row; they have no Tab.
+    const { isTablet } = useDeviceInfo();
+    const hasKeyboardLayout = !isMobile && !isTablet;
     const sessionAssist = useSessionAssistState(currentSessionId ?? '', currentSessionDirectoryForSync ?? currentDirectory);
     const ghostPayloadKey = sessionAssist.assist ? `${sessionAssist.assist.forMessageID}:${sessionAssist.assist.generatedAt}` : '';
-    const [dismissedGhostText, setDismissedGhostText] = React.useState<ReadonlyMap<string, string>>(() => new Map());
-    const ghostCandidate = sessionAssist.suggestion ?? sessionAssist.options[0] ?? null;
-    const ghostTextValue = !isMobile
-        && currentSessionId
-        && ghostCandidate
-        && message.length === 0
-        && !suggestionHidden
-        && inputMode === 'normal'
-        && dismissedGhostText.get(currentSessionId) !== ghostPayloadKey
-        ? ghostCandidate
-        : null;
+    const [ghostTextDismissals, setGhostTextDismissals] = React.useState<GhostTextDismissals>(() => new Map());
+    const ghostTextValue = visibleGhostText({
+        candidate: sessionAssist.suggestion ?? sessionAssist.options[0] ?? null,
+        payloadKey: ghostPayloadKey,
+        sessionId: currentSessionId,
+        hasKeyboardLayout,
+        composerText: message,
+        suggestionHidden,
+        inputMode,
+        dismissals: ghostTextDismissals,
+    });
     const ghostTextAcceptKey = formatShortcutForDisplay('tab');
-    const dismissGhostText = () => {
-        if (!currentSessionId || !ghostPayloadKey) return;
-        setDismissedGhostText((current) => new Map(current).set(currentSessionId, ghostPayloadKey));
-    };
+    // Uses up the payload while its ghost text shows; otherwise a no-op.
+    const dismissGhostText = React.useCallback(() => {
+        if (!ghostTextValue || !currentSessionId) return;
+        setGhostTextDismissals((current) => withGhostTextDismissed(current, currentSessionId, ghostPayloadKey));
+    }, [currentSessionId, ghostPayloadKey, ghostTextValue]);
 
     const handleKeyDown = (e: KeyboardEvent) => {
         // Early return during IME composition to prevent interference with autocomplete.
@@ -2458,19 +2463,17 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
 
         // Visible ghost text owns plain Tab and Escape; once it is gone, both
         // fall through to agent cycling and the Escape branches below.
-        if (ghostTextValue && openAutocomplete === null) {
-            const action = ghostTextKeyAction(e);
-            if (action === 'accept' || action === 'dismiss') {
-                e.preventDefault();
-                e.stopPropagation();
-                if (action === 'accept') applyAssistSuggestion(ghostTextValue);
-                else dismissGhostText();
-                return;
-            }
-            // A typed `!` switches to shell mode without changing the text, so
-            // the change handler would not see it.
-            if (action === 'dismiss-and-continue') dismissGhostText();
+        const ghostTextAction = ghostTextKeyAction(e, { visible: ghostTextValue !== null, autocompleteOpen: openAutocomplete !== null });
+        if (ghostTextValue && (ghostTextAction === 'accept' || ghostTextAction === 'dismiss')) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (ghostTextAction === 'accept') applyAssistSuggestion(ghostTextValue);
+            else dismissGhostText();
+            return;
         }
+        // A typed `!` switches to shell mode without changing the text, so
+        // the change handler would not see it.
+        if (ghostTextAction === 'dismiss-and-continue') dismissGhostText();
 
         // Enter shell mode before CodeMirror inserts the trigger. Keeping the
         // document unchanged also keeps the caret at the start for the first
@@ -2777,7 +2780,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const handleComposerChange = ({ value, selection, fromPaste, insertedText, fromValueProp }: ComposerChange) => {
         // Whatever filled the empty composer under the ghost text, typing,
         // pasting or accepting it, retires it for this payload.
-        if (ghostTextValue && value.length > 0) dismissGhostText();
+        if (value.length > 0) dismissGhostText();
         if (largeTextPasteBehavior === 'inline-double-paste') {
             largeTextPasteGesture.change({
                 value, selection, fromPaste, insertedText,
@@ -2929,6 +2932,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         // Narrowed alias so the rest of the handler reads as it did when this
         // was a React synthetic event, whose clipboardData is never null.
         const e = { ...event, clipboardData, preventDefault: () => event.preventDefault() };
+        // A paste that becomes an attachment leaves the text empty, so the
+        // change handler would not retire the ghost text.
+        dismissGhostText();
 
         // Pasting a URL over a selection wraps it as a markdown link:
         // [selected text](pasted url).
@@ -3138,7 +3144,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
 
         e.preventDefault();
         await attachFilesWithCitation([...imageFiles, ...otherFiles], pastedText);
-    }, [addAttachedFile, attachFilesWithCitation, currentSessionId, inputMode, largeTextPasteBehavior, largeTextPasteGesture, readLargeTextPasteSnapshot, markFileMentionPasteSuppression, message, mobileShell, newSessionDraftOpen, insertTextAtSelection, setMessage, t, updateAutocompleteState]);
+    }, [addAttachedFile, attachFilesWithCitation, currentSessionId, dismissGhostText, inputMode, largeTextPasteBehavior, largeTextPasteGesture, readLargeTextPasteSnapshot, markFileMentionPasteSuppression, message, mobileShell, newSessionDraftOpen, insertTextAtSelection, setMessage, t, updateAutocompleteState]);
 
     // Android commits an image through the IME instead of the page (see nativeImagePaste).
     React.useEffect(() => {
@@ -3817,14 +3823,20 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     attachMobileCommentRef.current = mobileComment.submit;
 
 
+    // Ghost text, a chip and the suggestion row all land here. Taking the
+    // suggestion uses up its payload, so clearing the text does not bring the
+    // ghost text back, and it is one undo step of its own.
     const applyAssistSuggestion = React.useCallback((text: string) => {
-        setMessage(text);
+        dismissGhostText();
+        const editor = composerRef.current;
+        if (editor) editor.replaceAll(text);
+        else setMessage(text);
         if (isMobile && !mobileComposerExpanded) {
             mobileShell.expand();
         } else {
             requestAnimationFrame(() => composerRef.current?.focus());
         }
-    }, [isMobile, mobileComposerExpanded, mobileShell]);
+    }, [dismissGhostText, isMobile, mobileComposerExpanded, mobileShell]);
 
     // Linked references render as chips beside the attached files, inside the
     // composer box and inside the mobile pill.
@@ -3923,7 +3935,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             suggestion={sessionAssist.suggestion}
             options={sessionAssist.options}
             hidden={suggestionHidden}
-            showContinuation={isMobile}
+            showContinuation={!hasKeyboardLayout}
             onApply={applyAssistSuggestion}
         />
     ) : null;

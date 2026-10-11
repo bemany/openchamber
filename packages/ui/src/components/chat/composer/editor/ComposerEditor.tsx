@@ -38,7 +38,7 @@ import type { ComposerAutoCorrect } from './autocorrect';
 import { composerLanguage, setLanguageContext } from './composerLanguage';
 import { composerBidi } from './bidi';
 import { composerGhostText, setGhostText, type ComposerGhostText } from './ghostText';
-import { replaceWithCaret } from './documentEdits';
+import { replaceAllAsOwnStep, replaceWithCaret } from './documentEdits';
 import type { ComposerEditorViewStore } from './viewStore';
 import { ComposerEditorView } from './ComposerEditorView';
 import { composerEditorTheme, composerSelectionExtension } from './theme';
@@ -78,6 +78,8 @@ export interface ComposerEditorHandle {
     insertText(text: string): void;
     /** Replace a range; selection defaults to a caret after the inserted text. */
     replaceRange(from: number, to: number, text: string, selectionStart?: number, selectionEnd?: number): void;
+    /** Replace the whole document as one undo step of its own, caret at the end. */
+    replaceAll(text: string): void;
     /** Viewport coordinates of the caret, for positioning popups. */
     caretCoords(position?: number): { top: number; bottom: number; left: number } | null;
     /** The scrollable element, for measuring and scroll compensation. */
@@ -610,6 +612,11 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
                     ...replaceWithCaret(view.state, from, to, text, caret),
                     userEvent: 'input.type',
                 });
+            },
+            replaceAll(text) {
+                const view = viewRef.current;
+                if (!view) return;
+                view.dispatch(replaceAllAsOwnStep(view.state, text));
             },
             caretCoords(position) {
                 const view = viewRef.current;

@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
-    ghostTextKeyAction,
     restoreDeferredEnterModifiers,
     shouldSubmitEnter,
     type EnterKeyPolicyInput,
@@ -125,34 +124,5 @@ describe('deferred Enter modifiers', () => {
         restoreDeferredEnterModifiers(event, { shiftKey: true, ctrlKey: false, metaKey: false }, false);
 
         expect(event).toEqual({ shiftKey: false, ctrlKey: false, metaKey: false });
-    });
-});
-
-describe('ghost text keys', () => {
-    const key = (name: string, modifiers: Partial<Record<'shiftKey' | 'altKey' | 'ctrlKey' | 'metaKey', boolean>> = {}) => ghostTextKeyAction({
-        key: name, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, ...modifiers,
-    });
-
-    test('plain Tab accepts, Escape dismisses', () => {
-        expect(key('Tab')).toBe('accept');
-        expect(key('Escape')).toBe('dismiss');
-    });
-
-    test('modified Tab keeps its own meaning', () => {
-        expect(key('Tab', { shiftKey: true })).toBeNull();
-        expect(key('Tab', { ctrlKey: true })).toBeNull();
-        expect(key('Tab', { altKey: true })).toBeNull();
-    });
-
-    test('a typed character dismisses and still types', () => {
-        expect(key('a')).toBe('dismiss-and-continue');
-        expect(key('!')).toBe('dismiss-and-continue');
-        expect(key('A', { shiftKey: true })).toBe('dismiss-and-continue');
-    });
-
-    test('shortcuts and navigation leave it alone', () => {
-        expect(key('v', { metaKey: true })).toBeNull();
-        expect(key('ArrowUp')).toBeNull();
-        expect(key('Enter')).toBeNull();
     });
 });

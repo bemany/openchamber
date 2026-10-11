@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { EditorState } from '@codemirror/state';
+import { history, redo, undo } from '@codemirror/commands';
+import { EditorState, type Transaction } from '@codemirror/state';
 
-import { replaceWithCaret } from '../documentEdits';
+import { replaceAllAsOwnStep, replaceWithCaret } from '../documentEdits';
 
 const apply = (doc: string, from: number, to: number, insert: string, caret?: { anchor: number; head: number }) => {
     const state = EditorState.create({ doc });
@@ -56,3 +57,27 @@ describe('replaceWithCaret', () => {
         expect(selection.anchor).toBe(3);
     });
 });
+
+describe('replaceAllAsOwnStep', () => {
+    /** Runs an undo/redo command on a state and returns the result. */
+    const run = (state: EditorState, command: typeof undo): EditorState => {
+        let next = state;
+        command({ state, dispatch: (transaction: Transaction) => { next = transaction.state; } });
+        return next;
+    };
+
+    test('is one undo step even when typing follows at once', () => {
+        const empty = EditorState.create({ doc: '', extensions: history() });
+        const taken = empty.update(replaceAllAsOwnStep(empty, 'Run tests')).state;
+        expect(taken.selection.main.head).toBe(9);
+        const typed = taken.update({ changes: { from: 9, insert: '!' }, selection: { anchor: 10 }, userEvent: 'input.type' }).state;
+        expect(typed.doc.toString()).toBe('Run tests!');
+
+        const undoneTyping = run(typed, undo);
+        expect(undoneTyping.doc.toString()).toBe('Run tests');
+        const undoneTaking = run(undoneTyping, undo);
+        expect(undoneTaking.doc.toString()).toBe('');
+        expect(run(undoneTaking, redo).doc.toString()).toBe('Run tests');
+    });
+});
+

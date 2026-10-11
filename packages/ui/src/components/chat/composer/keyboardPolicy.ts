@@ -39,25 +39,3 @@ export const restoreDeferredEnterModifiers = (
     if (modifiers.ctrlKey) Object.defineProperty(event, 'ctrlKey', { value: true });
     if (modifiers.metaKey) Object.defineProperty(event, 'metaKey', { value: true });
 };
-
-interface GhostTextKey {
-    key: string;
-    shiftKey: boolean;
-    altKey: boolean;
-    ctrlKey: boolean;
-    metaKey: boolean;
-}
-
-/**
- * What a key does while ghost text is visible and no picker is open. Plain Tab
- * accepts and Escape dismisses, and both stop there; a printable character
- * dismisses and then does what it always does. Everything else, Shift+Tab
- * included, leaves the ghost text alone.
- */
-export const ghostTextKeyAction = (event: GhostTextKey): 'accept' | 'dismiss' | 'dismiss-and-continue' | null => {
-    const modified = event.altKey || event.ctrlKey || event.metaKey;
-    if (event.key === 'Tab') return modified || event.shiftKey ? null : 'accept';
-    if (event.key === 'Escape') return 'dismiss';
-    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) return 'dismiss-and-continue';
-    return null;
-};
