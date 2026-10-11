@@ -51,7 +51,7 @@ afterEach(() => {
  * `userText` and answered `answerText`, with the Small Model returning
  * `modelText`. Resolves the payload handed to the store, or null.
  */
-const generateOnce = async ({ modelText, targets = { recap: true, suggestion: true }, userText = 'Do the thing', answerText = 'Shall I merge it?' }) => {
+const generateOnce = async ({ modelText, targets = { recap: true, suggestion: true }, userText = 'Do the thing', answerText = 'Shall I merge it?', isSessionArchived, onPersistWait = null }) => {
   const persistSessionAssist = vi.fn(async () => undefined);
   const records = [
     { id: 'msg_idle', type: 'idle', outcome: 'succeeded' },
@@ -69,6 +69,7 @@ const generateOnce = async ({ modelText, targets = { recap: true, suggestion: tr
   const generateSmallModelText = vi.fn(async () => ({ text: modelText }));
   const { runtime } = makeRuntime({
     persistSessionAssist,
+    isSessionArchived: (sessionId) => (isSessionArchived ? isSessionArchived(sessionId, runtime) : Promise.resolve(false)),
     getTargets: () => targets,
     buildOpenCodeUrl: (fetchPath) => `http://opencode.test${fetchPath}`,
     getSmallModelService: async () => ({
@@ -83,6 +84,7 @@ const generateOnce = async ({ modelText, targets = { recap: true, suggestion: tr
   for (let i = 0; i < 10 && persistSessionAssist.mock.calls.length === 0; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+  if (onPersistWait) await onPersistWait();
   return { payload: persistSessionAssist.mock.calls[0]?.[2] ?? null, generateSmallModelText };
 };
 
@@ -313,6 +315,29 @@ describe('session assist runtime', () => {
 
     expect(generateSmallModelText.mock.calls[0][0].system).not.toContain('options');
     expect(payload).toMatchObject({ recap: 'Fixed the header.', suggestion: '', options: [] });
+  });
+
+  it('writes nothing when a turn starts while the final archive check is pending', async () => {
+    let checks = 0;
+    let release;
+    const { payload } = await generateOnce({
+      modelText: JSON.stringify({ recap: 'Fixed the header.', suggestion: 'Merge it.' }),
+      // The second check is the one right before the write: hold it, start a
+      // new turn, then let it answer "not archived".
+      isSessionArchived: (_sessionId, runtime) => {
+        checks += 1;
+        if (checks < 2) return Promise.resolve(false);
+        runtime.processPayload({ type: 'session.status', properties: { sessionID: 'ses_1', status: { type: 'busy' } } });
+        return new Promise((resolve) => { release = () => resolve(false); });
+      },
+      onPersistWait: async () => {
+        release?.();
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      },
+    });
+
+    expect(checks).toBe(2);
+    expect(payload).toBeNull();
   });
 });
 
