@@ -28,4 +28,4 @@
 - [x] 5.1 `bun run check:changed` and `bun run test` green.
 - [x] 5.2 Live check against a real OpenCode session on the builder (dev port, not 3000): continuation turn shows ghost text, decision turn shows 2 to 3 chips, finished turn shows nothing; record screenshots for the PR.
   Done on an isolated OpenCode (own XDG dirs, port 4196) with Haiku 5.5: desktop and touch-tablet screenshots from that run; phone-layout screenshots are from the first round.
-- [ ] 5.3 Reviews by `reviewer` and `reviewer-astra`, findings resolved.
+- [x] 5.3 Reviews by `reviewer` and `reviewer-astra`, findings resolved.
