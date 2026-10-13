@@ -29,3 +29,10 @@
 - [x] 5.2 Live check against a real OpenCode session on the builder (dev port, not 3000): continuation turn shows ghost text, decision turn shows 2 to 3 chips, finished turn shows nothing; record screenshots for the PR.
   Done on an isolated OpenCode (own XDG dirs, port 4196) with Haiku 5.5: desktop and touch-tablet screenshots from that run; phone-layout screenshots are from the first round.
 - [x] 5.3 Reviews by `reviewer` and `reviewer-astra`, findings resolved.
+
+## 6. Port auf v2.3.1
+
+- [x] 6.1 Cherry-pick onto upstream v2.3.1 without the archive-recheck fix (upstream #4739); `session-assist/runtime.js` keeps upstream's `checkCurrent` steps unchanged.
+- [x] 6.2 Adapt to v2.3.1: `awaits_reply` beside the turn-end questions now that Jev no longer asks the open questions; logical padding (`ps`/`pe`) in the suggestion row; i18n keys for the new `ar` and `he` locales.
+- [x] 6.3 Ghost-text Escape bubbles prevented so the double-Escape stop disarms (`ghostTextKeyStopsAtComposer`); typing and pasting with nothing focused and the large-paste choice dismiss it through the same handlers; verify with `state/__tests__/ghostText.test.ts` and `editor/__tests__/ghostTextInputRedirect.test.ts`.
+- [ ] 6.4 Reviews by `reviewer` and `reviewer-astra` on the ported branch, and a live check on the builder.
