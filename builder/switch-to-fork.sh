@@ -52,15 +52,16 @@ ACTIVITY_TAG="[switch-to-fork]"
 runs() { activity_runs_cli "$1"; }
 
 # Nur prüfen: vor jedem anderen Zweig, endet immer ohne Seiteneffekte (Exit 1 = aktiv)
-for a in "$@"; do case "$a" in --check) CHECK_ONLY=1 ;; esac; done
+for a in "$@"; do case "$a" in --check) CHECK_ONLY=1 ;; --dry-run) DRY_RUN=1 ;; esac; done
 if [ "${CHECK_ONLY:-0}" = "1" ]; then
   if activity_check; then exit 0; fi
   exit 1
 fi
 
-# Temp-Datei für das Startskript; Trap erst hier, damit --check nichts anfasst
+# Temp-Datei für das Startskript; Trap erst nach --check und nicht bei --dry-run,
+# damit beide nichts anfassen
 TMP="$START.tmp.$$"
-trap 'rm -f "$TMP"' EXIT
+[ "${DRY_RUN:-0}" = "1" ] || trap 'rm -f "$TMP"' EXIT
 
 # Startskript auf $FORK_CLI umschreiben. Erlaubt nur in der strengen Form aus
 # lib/startscript.sh, deren cli.js-Argument die npm-Version oder ein erlaubter
@@ -76,6 +77,7 @@ rewrite_start() {
     return 0
   fi
   (umask 077 && start_rewrite "$START" "$FORK_CLI" > "$TMP") || die "Pfadersetzung fehlgeschlagen"
+  _why=$(start_rewrite_check "$START" "$TMP" "$FORK_CLI") || die "Pfadersetzung nicht verlustfrei ($_why); nicht geändert."
   _new=$(start_cli "$TMP") && [ "$_new" = "$FORK_CLI" ] || die "Pfadersetzung fehlgeschlagen"
   chmod 700 "$TMP"
   [ "$_old" = "$NPM_CLI" ] || backup_fork "$_old"
@@ -134,8 +136,70 @@ check_release() {
   [ -d "$RELEASE/node_modules" ] || die "node_modules fehlt, erst 'bun install' im Release-Worktree"
   HEAD=$(git -C "$RELEASE" rev-parse HEAD) || die "Release-Worktree $RELEASE ist kein Git-Worktree"
   [ "$HEAD" = "$EXPECTED_COMMIT" ] || die "Release-Worktree steht auf $HEAD, erwartet $EXPECTED_COMMIT (EXPECTED_COMMIT=… setzen, wenn gewollt)"
-  [ -z "$(git -C "$RELEASE" status --porcelain --untracked-files=no)" ] || die "Release-Worktree hat lokale Änderungen"
+  # --no-optional-locks: status schreibt den Index nicht (Phase 1 und --dry-run bleiben lesend)
+  _st=$(git --no-optional-locks -C "$RELEASE" status --porcelain --untracked-files=no) || die "git status im Release-Worktree fehlgeschlagen"
+  [ -z "$_st" ] || die "Release-Worktree hat lokale Änderungen"
 }
+
+# --dry-run: Phase 1 komplett lesend, meldet was passieren würde. Schreibt nichts,
+# startet keine Phase 2. Exit 0 = würde umschalten (oder nichts zu tun), 1 = blockiert/Fehler.
+dry() { echo "[switch-to-fork] [dry-run] $*"; }
+dry_run() {
+  dry "Ziel: $FORK_CLI (EXPECTED_COMMIT=$EXPECTED_COMMIT)"
+  check_release
+  dry "OK  Release-Worktree: erlaubter Pfad, dist und node_modules vorhanden, HEAD = EXPECTED_COMMIT, sauber"
+  _cur=$(start_cli "$START") || die "$_cur"
+  dry "OK  Startskript in strenger Form, cli.js = $_cur"
+  if [ "$_cur" != "$FORK_CLI" ]; then
+    _why=$(start_rewrite "$START" "$FORK_CLI" | start_rewrite_check "$START" - "$FORK_CLI") ||
+      die "Umschreiben wäre nicht verlustfrei ($_why)"
+    dry "OK  Umschreiben verlustfrei: $_cur -> $FORK_CLI"
+  else
+    dry "OK  Startskript zeigt schon auf das Ziel, würde nicht umgeschrieben"
+  fi
+  # npm-Sicherung
+  if [ -e "$BACKUP" ] || [ -L "$BACKUP" ]; then
+    private_file_ok "$BACKUP" || die "Sicherung $BACKUP ist kein privates reguläres eigenes File (Symlink, fremd oder Rechte für Gruppe/Welt)"
+    _b=$(start_cli "$BACKUP") && [ "$_b" = "$NPM_CLI" ] || die "$BACKUP enthält nicht die npm-Version"
+    dry "OK  npm-Sicherung vorhanden und privat: $BACKUP"
+  elif fork_cli_ok "$_cur"; then
+    dry "--  keine npm-Sicherung, Startskript zeigt schon auf einen Fork (würde keine anlegen)"
+  else
+    dry "würde npm-Sicherung anlegen: $BACKUP"
+  fi
+  # Fork-Sicherung bei Fork->Fork
+  if [ "$_cur" != "$FORK_CLI" ] && [ "$_cur" != "$NPM_CLI" ]; then
+    _rel=${_cur%"$CLI_SUFFIX"}
+    _full=$(git -C "$_rel" rev-parse HEAD 2>/dev/null) || _full=
+    case "$_full" in '' | *[!0123456789abcdef]*) _fb="$START.fork-<zeitstempel>.bak" ;; *) _fb="$START.fork-$(printf '%.12s' "$_full").bak" ;; esac
+    if [ -e "$_fb" ] || [ -L "$_fb" ]; then
+      private_file_ok "$_fb" || die "Fork-Sicherung $_fb ist kein privates reguläres eigenes File"
+      if cmp -s "$START" "$_fb"; then dry "OK  Fork-Sicherung vorhanden: $_fb"; else dry "würde Fork-Sicherung daneben anlegen: $_fb-<zeitstempel> (vorhandene unterscheidet sich)"; fi
+    else
+      dry "würde Fork-Sicherung anlegen: $_fb (Rückweg: SWITCH_RELEASE=$_rel EXPECTED_COMMIT=${_full:-<alter Commit>})"
+    fi
+  fi
+  if runs "$FORK_CLI"; then
+    dry "Ziel läuft bereits: würde nur das Startskript angleichen, kein Neustart"
+    exit 0
+  fi
+  if activity_check; then
+    dry "OK  Aktivitätsprüfung ruhig"
+  elif [ "${FORCE:-0}" = "1" ]; then
+    dry "Aktivität erkannt, FORCE=1: würde trotzdem umschalten"
+  else
+    dry "BLOCKIERT: Aktivität erkannt (siehe oben), würde nicht umschalten"
+    exit 1
+  fi
+  if [ -n "${ACTIVITY_IGNORE_SESSION:-}" ] && [ "${FORCE:-0}" != "1" ]; then
+    dry "Phase 2 würde warten, bis die Aufrufer-Sessions fertig sind (höchstens ${ACTIVITY_WAIT_TIMEOUT:-900} s), dann ohne Ausnahme prüfen"
+  fi
+  dry "Ergebnis: würde umschalten ($_cur -> $FORK_CLI) und OpenChamber neu starten. Nichts geändert."
+  exit 0
+}
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  dry_run
+fi
 
 # Interne Phase (abgekoppelt): Nachweis verbrauchen, warten/zweite Prüfung,
 # Startskript umschreiben, Neustart, Prüfung.

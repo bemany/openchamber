@@ -19,6 +19,19 @@ Betriebsskripte für den Builder (xcode-builder), auf dem der LaunchAgent
 - `--check` oder `CHECK_ONLY=1`: Wird vor allem anderen behandelt (auch vor dem Aufräum-Trap), meldet
   nur die Aktivität und endet ohne Schreibzugriffe (Exit 0 = ruhig, 1 = aktiv), auch zusammen mit
   anderen Argumenten.
+- `--dry-run` (oder `DRY_RUN=1`): Läuft Phase 1 komplett lesend durch und meldet, was passieren würde,
+  ohne etwas zu schreiben oder Phase 2 zu starten. Geprüft werden:
+  - die Form des Startskripts,
+  - der Release-Pfad, `EXPECTED_COMMIT` und ein sauberer Worktree (`git --no-optional-locks`, der Index
+    wird nicht aufgefrischt), dazu `dist` und `node_modules`,
+  - die vorhandenen Sicherungen (privat, Inhalt),
+  - ob das Umschreiben verlustfrei wäre, mit altem und neuem `cli.js`-Pfad und den Sicherungen, die
+    angelegt würden,
+  - die Aktivität, inklusive `ACTIVITY_IGNORE_SESSION` und `FORCE=1`.
+
+  Exit 0 heißt „würde umschalten“ oder „nichts zu tun“, 1 heißt blockiert oder Fehler. Kein Aufräum-Trap,
+  keine Temp-Datei, kein Nachweis. `--check` hat Vorrang. Vor jedem echten Wechsel empfohlen:
+  `SWITCH_RELEASE=… EXPECTED_COMMIT=… sh switch-to-fork.sh --dry-run`.
 - `FORCE=1`: Schaltet trotz Aktivität um (beide Prüfungen), listet sie aber trotzdem auf.
 - `--restart` ist die interne, abgekoppelte Phase. Sie läuft nur mit dem Einmal-Nachweis aus Phase 1:
   eine Datei mit Zufallstoken in einem per `mktemp -d` angelegten 0700-Verzeichnis direkt unter dem
@@ -56,7 +69,9 @@ SWITCH_RELEASE=~/Projects/openchamber-release-<sha> EXPECTED_COMMIT=<voller sha>
 
 - Das Startskript muss genau diese Form haben (`lib/startscript.sh`), sonst Abbruch ohne Änderung:
   Zeile 1 `#!/bin/sh`, Zeile 2 `exec '<node>' '<cli.js>' 'serve' …`, nichts sonst. Alle Argumente einfach
-  gequotet ohne eingebettetes `'`, durch genau ein Leerzeichen getrennt, nichts nach dem letzten Quote.
+  gequotet, nicht leer, ohne eingebettetes `'`, durch genau ein Leerzeichen getrennt, nichts nach dem letzten
+  Quote. Nach dem Umschreiben wird geprüft, dass Anzahl und alle übrigen Argumente byte-identisch sind.
+  Die Prüfungen sind locale-unabhängig (ausgeschriebene Zeichenlisten, awk mit `LC_ALL=C`).
   Das zweite Argument muss exakt die npm-`cli.js` oder ein erlaubter Fork-Release-Pfad
   (`~/Projects/openchamber-release[-A-Za-z0-9._]*/packages/web/bin/cli.js`) sein. Nur dieses Argument
   wird ersetzt (Temp-Datei, 0700, `mv`). Phase 1 prüft die Form schon lesend vor allem anderen, Phase 2

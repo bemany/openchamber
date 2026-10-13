@@ -48,7 +48,7 @@ ACTIVITY_TAG="[switch-to-npm]"
 runs() { activity_runs_cli "$1"; }
 
 # Nur prüfen: vor jedem anderen Zweig, endet immer ohne Seiteneffekte (Exit 1 = aktiv)
-for a in "$@"; do case "$a" in --check) CHECK_ONLY=1 ;; esac; done
+for a in "$@"; do case "$a" in --check) CHECK_ONLY=1 ;; --dry-run) DRY_RUN=1 ;; esac; done
 if [ "${CHECK_ONLY:-0}" = "1" ]; then
   if activity_check; then exit 0; fi
   exit 1
@@ -56,7 +56,7 @@ fi
 
 # Temp-Datei für das Startskript; Trap erst hier, damit --check nichts anfasst
 TMP="$START.tmp.$$"
-trap 'rm -f "$TMP"' EXIT
+[ "${DRY_RUN:-0}" = "1" ] || trap 'rm -f "$TMP"' EXIT
 
 # Startskript wiederherstellen: bevorzugt aus der Sicherung, sonst Pfad zurücktauschen
 restore_start() {
@@ -77,6 +77,46 @@ restore_start() {
     say "Pfad im Startskript zurückgetauscht (keine Sicherung gefunden)"
   fi
 }
+
+# --dry-run: Phase 1 komplett lesend, meldet was passieren würde. Schreibt nichts,
+# startet keine Phase 2. Exit 0 = würde umschalten (oder nichts zu tun), 1 = blockiert/Fehler.
+dry() { echo "[switch-to-npm] [dry-run] $*"; }
+dry_run() {
+  [ -f "$NPM_CLI" ] || die "npm-Installation fehlt: $NPM_CLI"
+  dry "OK  npm-Installation vorhanden: $NPM_CLI"
+  [ -f "$START" ] || die "$START fehlt, Startskript von Hand prüfen"
+  if grep -qF "$NPM_CLI" "$START"; then
+    dry "OK  Startskript zeigt schon auf npm, würde nicht geändert"
+  elif [ -e "$BACKUP" ] || [ -L "$BACKUP" ]; then
+    private_file_ok "$BACKUP" || die "Sicherung $BACKUP ist kein privates reguläres eigenes File (Symlink, fremd oder Rechte für Gruppe/Welt)"
+    grep -qF "$NPM_CLI" "$BACKUP" || die "$BACKUP enthält nicht den npm-Pfad"
+    dry "würde Startskript aus $BACKUP wiederherstellen"
+  elif grep -qF "$FORK_CLI" "$START"; then
+    dry "würde im Startskript $FORK_CLI -> $NPM_CLI zurücktauschen (keine Sicherung gefunden)"
+  else
+    die "keine npm-Sicherung und Startskript enthält $FORK_CLI nicht; SWITCH_RELEASE=<aktueller Fork-Pfad> setzen"
+  fi
+  if runs "$NPM_CLI"; then
+    dry "npm-Version läuft bereits: würde nur das Startskript angleichen, kein Neustart"
+    exit 0
+  fi
+  if activity_check; then
+    dry "OK  Aktivitätsprüfung ruhig"
+  elif [ "${FORCE:-0}" = "1" ]; then
+    dry "Aktivität erkannt, FORCE=1: würde trotzdem umschalten"
+  else
+    dry "BLOCKIERT: Aktivität erkannt (siehe oben), würde nicht umschalten"
+    exit 1
+  fi
+  if [ -n "${ACTIVITY_IGNORE_SESSION:-}" ] && [ "${FORCE:-0}" != "1" ]; then
+    dry "Phase 2 würde warten, bis die Aufrufer-Sessions fertig sind (höchstens ${ACTIVITY_WAIT_TIMEOUT:-900} s), dann ohne Ausnahme prüfen"
+  fi
+  dry "Ergebnis: würde auf npm umschalten und OpenChamber neu starten. Nichts geändert."
+  exit 0
+}
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  dry_run
+fi
 
 # Interne Phase (abgekoppelt), nur mit dem Einmal-Nachweis aus Phase 1
 if [ "${1:-}" = "--restart" ]; then

@@ -69,7 +69,7 @@ activity_say() { echo "$ACTIVITY_TAG $*"; }
 # Die Grenzen halten alle späteren Multiplikationen weit unter 64 Bit.
 activity_int() {
   case "$2" in
-    '' | *[!0-9]* | 0?* | ????????????????*) echo "$1 ungültig: '$2' (nicht-negative Ganzzahl erwartet)"; return 1 ;;
+    '' | *[!0123456789]* | 0?* | ????????????????*) echo "$1 ungültig: '$2' (nicht-negative Ganzzahl erwartet)"; return 1 ;;
   esac
   [ "$2" -ge "${3:-0}" ] || { echo "$1 ungültig: '$2' (mindestens ${3:-0})"; return 1; }
   [ -z "${4:-}" ] || [ "$2" -le "$4" ] || { echo "$1 ungültig: '$2' (höchstens $4)"; return 1; }
@@ -121,8 +121,8 @@ activity_live_default() {
   _pid=$(printf '%s\n' "$_line" | awk '{ print $1 }')
   _port=$(activity_opt "$_line" port)
   _host=$(activity_opt "$_line" hostname)
-  case "$_port" in '' | *[!0-9]*) echo "Port der OpenCode-Instanz (PID $_pid) nicht lesbar"; return 1 ;; esac
-  case "$_host" in '' | 0.0.0.0) _host=127.0.0.1 ;; *[!A-Za-z0-9.-]*) echo "Host '$_host' nicht unterstützt"; return 1 ;; esac
+  case "$_port" in '' | *[!0123456789]*) echo "Port der OpenCode-Instanz (PID $_pid) nicht lesbar"; return 1 ;; esac
+  case "$_host" in '' | 0.0.0.0) _host=127.0.0.1 ;; *[!-.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]*) echo "Host '$_host' nicht unterstützt"; return 1 ;; esac
 
   # Prozessumgebung erst vollständig erfassen (Exitcode geprüft), dann parsen
   _env=$(eval "$ACTIVITY_ENV_CMD \"\$_pid\"" 2>/dev/null) || { _env=; echo "Prozessumgebung von PID $_pid nicht lesbar"; return 1; }
@@ -195,7 +195,7 @@ activity_runs_cli() {
 # Ungültige ID oder DB-Fehler: Grund auf stdout, Exit 1.
 activity_ignored_ids() {
   _id=${ACTIVITY_IGNORE_SESSION:-}
-  case "$_id" in '' | *[!A-Za-z0-9_]*) echo "ACTIVITY_IGNORE_SESSION ungültig: '$_id'"; return 1 ;; esac
+  case "$_id" in '' | *[!_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]*) echo "ACTIVITY_IGNORE_SESSION ungültig: '$_id'"; return 1 ;; esac
   _anc=$(sqlite3 -readonly "$ACTIVITY_DB" "
     with recursive anc(id, parent) as (
       select id, parent_id from session_v2 where id = '$_id'

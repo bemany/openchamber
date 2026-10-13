@@ -761,6 +761,100 @@ OUT=$(script_env SWITCH_RELEASE="$TMP/anderes" sh "$SPF" 2>&1); RC=$?
 result "SWITCH_RELEASE außerhalb des Musters -> Abbruch in Phase 1" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'kein erlaubter Fork-Release-Pfad')" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)")" "rc=$RC
 $OUT"
 
+# === Leere Argumente und verlustfreies Umschreiben ================================
+abort_case "Leeres Argument am Ende -> Abbruch ohne Änderung" "exec '/opt/node' '$OLDCLI' 'serve' ''" "$NOFORM"
+abort_case "Leeres Argument in der Mitte -> Abbruch ohne Änderung" "exec '/opt/node' '$OLDCLI' 'serve' '' '--port' '3000'" "$NOFORM"
+abort_case "Leeres Node-Argument -> Abbruch ohne Änderung" "exec '' '$OLDCLI' 'serve'" "$NOFORM"
+SS="$HERE/../lib/startscript.sh"
+sc_run() { ( RELEASE_ROOT="$TMP"; NPM_CLI="$NPMCLI"; . "$SS"; eval "$1" ) 2>&1; }
+printf "#!/bin/sh\nexec '/opt/node' '%s' 'serve' '--port' '3000'\n" "$OLDCLI" > "$TMP/sc.a"
+printf "#!/bin/sh\nexec '/opt/node' '%s' 'serve' '--port'\n" "$FORKCLI" > "$TMP/sc.b"
+printf "#!/bin/sh\nexec '/opt/node' '%s' 'serve' '--port' '3001'\n" "$FORKCLI" > "$TMP/sc.c"
+printf "#!/bin/sh\nexec '/opt/node' '%s' 'serve' '--port' '3000'\n" "$FORKCLI" > "$TMP/sc.d"
+OUT=$(sc_run 'start_rewrite_check "$TMP/sc.a" "$TMP/sc.b" "'"$FORKCLI"'"'); RC=$?
+result "start_rewrite_check: Argument verloren -> abgelehnt" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'Argumentanzahl geändert')")" "rc=$RC $OUT"
+OUT=$(sc_run 'start_rewrite_check "$TMP/sc.a" "$TMP/sc.c" "'"$FORKCLI"'"'); RC=$?
+result "start_rewrite_check: anderes Argument geändert -> abgelehnt" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'andere Argumente geändert')")" "rc=$RC $OUT"
+OUT=$(sc_run 'start_rewrite_check "$TMP/sc.a" "$TMP/sc.d" "'"$FORKCLI"'"'); RC=$?
+result "start_rewrite_check: nur cli.js ersetzt -> ok" "$([ $RC = 0 ] && echo 1 || echo 0)" "rc=$RC $OUT"
+OUT=$(sc_run 'start_rewrite "$TMP/sc.a" "'"$FORKCLI"'" | start_rewrite_check "$TMP/sc.a" - "'"$FORKCLI"'"'); RC=$?
+result "start_rewrite ist verlustfrei (Prüfung über stdin)" "$([ $RC = 0 ] && echo 1 || echo 0)" "rc=$RC $OUT"
+
+# === Locale-unabhängige Pfadprüfung (sh und dash) =================================
+UMLAUT="$TMP/openchamber-release-ä/packages/web/bin/cli.js"
+for SH in sh dash; do
+  command -v "$SH" >/dev/null 2>&1 || continue
+  R=$(env LANG=de_DE.UTF-8 LC_ALL=de_DE.UTF-8 "$SH" -c '. "$1"; RELEASE_ROOT="$2"; fork_cli_ok "$3" && echo angenommen || echo abgelehnt' _ "$SS" "$TMP" "$UMLAUT")
+  result "$SH, de_DE.UTF-8: openchamber-release-ä -> abgelehnt" "$([ "$R" = abgelehnt ] && echo 1 || echo 0)" "$R"
+  R=$(env LANG=de_DE.UTF-8 LC_ALL=de_DE.UTF-8 "$SH" -c '. "$1"; RELEASE_ROOT="$2"; fork_cli_ok "$3" && echo angenommen || echo abgelehnt' _ "$SS" "$TMP" "$TMP/openchamber-release-a.B_9/packages/web/bin/cli.js")
+  result "$SH, de_DE.UTF-8: openchamber-release-a.B_9 -> angenommen" "$([ "$R" = angenommen ] && echo 1 || echo 0)" "$R"
+done
+db_s2; ps_idle; live_seq ''; reset_start x; printf "#!/bin/sh\nexec '/opt/node' '%s' 'serve'\n" "$UMLAUT" > "$TMP/start/OpenChamber"; cp "$TMP/start/OpenChamber" "$TMP/start.orig"; npm_backup
+OUT=$(script_env LANG=de_DE.UTF-8 LC_ALL=de_DE.UTF-8 sh "$SPF" 2>&1); RC=$?
+result "Startskript mit openchamber-release-ä unter de_DE.UTF-8 -> Abbruch" "$(all "$([ $RC = 1 ] && echo 1)" "$(has "$NOTALLOWED")" "$(unchanged)")" "rc=$RC
+$OUT"
+
+# === --dry-run: Phase 1 komplett lesend, schreibt nichts =========================
+# Zustand: Startskript-Verzeichnis (Namen, Rechte, Zeiten, Prüfsummen), Nachweis-
+# Verzeichnis, Git-Index beider Release-Worktrees, Log/launchctl-Mock
+snap() {
+  ls -laT "$TMP/start" "$TMP/tmpdir" "$REL/.git/index" "$OLDREL/.git/index" 2>&1
+  for f in "$TMP/start"/*; do [ -f "$f" ] && cksum < "$f"; done
+  ls "$MOCK/launchctl.log" "$TMP/phase2.log" 2>&1
+}
+dry_case() { # <name> <rc> <Muster> <Skript> [env…]
+  _n=$1; _rc=$2; _pat=$3; _sp=$4; shift 4
+  BEFORE=$(snap)
+  OUT=$(script_env "$@" sh "$_sp" --dry-run 2>&1); RC=$?
+  AFTER=$(snap)
+  result "$_n" "$(all "$([ $RC = "$_rc" ] && echo 1)" "$(has "$_pat")" "$([ "$BEFORE" = "$AFTER" ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(noproof)")" "rc=$RC (erwartet $_rc), Muster '$_pat'
+$OUT
+$( [ "$BEFORE" = "$AFTER" ] || printf 'Zustand geändert:\n%s\n---\n%s' "$BEFORE" "$AFTER")"
+}
+SPN="$HERE/../switch-to-npm.sh"
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"
+dry_case "dry-run npm->Fork: meldet Umschreiben und npm-Sicherung, ändert nichts" 0 "Umschreiben verlustfrei: $NPMCLI -> $FORKCLI" "$SPF"
+dry_case "dry-run npm->Fork: würde npm-Sicherung anlegen" 0 "würde npm-Sicherung anlegen" "$SPF"
+db_s2; ps_idle; live_seq ''; start_quoted "$OLDCLI"
+dry_case "dry-run Fork->Fork: meldet Fork-Sicherung mit altem Commit" 0 "würde Fork-Sicherung anlegen: $TMP/start/OpenChamber.fork-$OLDSHORT.bak" "$SPF"
+db_s2; ps_idle; live_seq 's2'; reset_start "$NPMCLI"
+dry_case "dry-run bei Aktivität -> blockiert, ändert nichts" 1 "BLOCKIERT: Aktivität erkannt" "$SPF"
+dry_case "dry-run bei Aktivität mit FORCE=1 -> würde umschalten" 0 "FORCE=1: würde trotzdem umschalten" "$SPF" FORCE=1
+ign_db; ps_idle; live_seq 'root mid me'; reset_start "$NPMCLI"
+dry_case "dry-run mit ACTIVITY_IGNORE_SESSION -> würde warten" 0 "Phase 2 würde warten" "$SPF" ACTIVITY_IGNORE_SESSION=me
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"; npm_backup; chmod 644 "$TMP/start/OpenChamber.npm-2.2.0.bak"
+dry_case "dry-run mit npm-Sicherung 0644 -> Fehler, Rechte unverändert" 1 "kein privates reguläres eigenes File" "$SPF"
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"
+echo dirty > "$REL/dirty.txt"; git -C "$REL" add dirty.txt
+dry_case "dry-run mit geändertem Release-Worktree -> Fehler, Index unverändert" 1 "lokale Änderungen" "$SPF"
+git -C "$REL" rm -q --cached dirty.txt; rm -f "$REL/dirty.txt"
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"
+dry_case "dry-run mit falschem EXPECTED_COMMIT -> Fehler" 1 "erwartet 0000000000000000000000000000000000000000" "$SPF" EXPECTED_COMMIT=0000000000000000000000000000000000000000
+db_s2; live_seq 's2'; reset_start "$FORKCLI"; ps_lines "1 0 /sbin/launchd" "100 1 /opt/node $FORKCLI serve --port 3000"
+dry_case "dry-run, Ziel läuft schon -> Exit 0, ohne Aktivitätsprüfung" 0 "Ziel läuft bereits" "$SPF"
+db_s2; ps_idle; live_seq ''; reset_start "$FORKCLI"; npm_backup
+dry_case "dry-run switch-to-npm: würde aus Sicherung wiederherstellen" 0 "würde Startskript aus $TMP/start/OpenChamber.npm-2.2.0.bak wiederherstellen" "$SPN"
+db_s2; ps_idle; live_seq 's2'; reset_start "$FORKCLI"; npm_backup
+dry_case "dry-run switch-to-npm bei Aktivität -> blockiert" 1 "BLOCKIERT" "$SPN"
+# Getrackte Datei mit veralteten Stat-Daten: ein normales git status würde den
+# Index auffrischen und schreiben, --dry-run darf das nicht
+echo inhalt > "$REL/tracked.txt"; git -C "$REL" add tracked.txt
+git -C "$REL" -c user.name=t -c user.email=t@t commit -q -m tracked; TRACKHEAD=$(git -C "$REL" rev-parse HEAD)
+sleep 1; touch "$REL/tracked.txt"
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"
+dry_case "dry-run frischt den Git-Index nicht auf (getrackte Datei angefasst)" 0 "Ergebnis: würde umschalten" "$SPF" EXPECTED_COMMIT="$TRACKHEAD"
+git -C "$REL" reset -q --hard "$RELHEAD"
+
+for SP in "$SPF" "$SPN"; do
+  db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"
+  OUT=$(script_env sh -c 'touch "$1.tmp.$$"; exec sh "$2" --dry-run' _ "$TMP/start/OpenChamber" "$SP" 2>&1); RC=$?
+  result "$(basename "$SP"): --dry-run lässt Datei mit TMP-Namen stehen" "$(noTmp | tr 1 2 | tr 0 1)" "rc=$RC $(ls "$TMP/start")"
+  db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"
+  OUT=$(script_env sh "$SP" --restart 0 --dry-run 2>&1); RC=$?
+  result "$(basename "$SP"): --restart --dry-run -> nur dry-run" "$(all "$(has '[dry-run]')" "$(called | tr 1 2 | tr 0 1)" "$(has 'interne Phase' | tr 1 2 | tr 0 1)")" "rc=$RC
+$OUT"
+done
+
 # switch-to-npm.sh: Startskript fehlt -> sauberer Abbruch vor sed, keine Temp-Datei
 db_s2; ps_idle; live_seq ''; reset_start "$FORKCLI"; rm -f "$TMP/start/OpenChamber"
 OUT=$(script_env sh "$HERE/../switch-to-npm.sh" 2>&1); RC=$?
