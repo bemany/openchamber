@@ -2021,6 +2021,8 @@ export const dict = {
   'chat.goal.cancelDialog.confirm': 'إلغاء الهدف',
   'chat.suggestion.applyAria': 'استخدام الرسالة المقترحة',
   'chat.suggestion.dismissAria': 'تجاهل الاقتراح',
+  'chat.suggestion.optionsAria': 'الردود المقترحة',
+  'chat.suggestion.ghost.description': 'اضغط {key} لإدراج الرسالة المقترحة: {text}',
   'header.actions.toggleTerminalPanelAria': 'إظهار/إخفاء لوحة الطرفية',
   'terminalView.stream.processExitedMessage': "\r\n[انتهت العملية{exitCodeSegment}{signalSegment}]\r\n",
   'terminalView.stream.processExitedWithCode': ' بالرمز {exitCode}',

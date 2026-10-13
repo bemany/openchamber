@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
     ghostTextDismissalsAfter,
     ghostTextKeyAction,
+    ghostTextKeyStopsAtComposer,
     visibleGhostText,
     withGhostTextDismissed,
     type GhostTextDismissals,
@@ -131,6 +132,11 @@ describe('ghost text keys', () => {
         expect(ghostTextKeyAction(key('a'), visible)).toBe('dismiss-and-continue');
         expect(ghostTextKeyAction(key('!'), visible)).toBe('dismiss-and-continue');
         expect(ghostTextKeyAction(key('A', { shiftKey: true }), visible)).toBe('dismiss-and-continue');
+    });
+
+    test('Escape keeps bubbling so the double-Escape stop disarms; Tab stops at the composer', () => {
+        expect(ghostTextKeyStopsAtComposer('dismiss')).toBe(false);
+        expect(ghostTextKeyStopsAtComposer('accept')).toBe(true);
     });
 
     test('shortcuts and navigation leave it alone', () => {

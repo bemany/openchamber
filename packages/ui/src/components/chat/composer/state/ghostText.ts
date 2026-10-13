@@ -92,3 +92,12 @@ export const ghostTextKeyAction = (
     if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) return 'dismiss-and-continue';
     return null;
 };
+
+/**
+ * Whether a key the ghost text took stops at the composer. Tab does, so no
+ * window shortcut sees it. Escape keeps bubbling, already prevented: the
+ * double-Escape stop (`useKeyboardShortcuts`) then counts it as an Escape the
+ * composer spent on itself and disarms, instead of never seeing it and
+ * keeping an earlier press armed.
+ */
+export const ghostTextKeyStopsAtComposer = (action: 'accept' | 'dismiss'): boolean => action === 'accept';

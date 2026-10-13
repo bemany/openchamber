@@ -63,7 +63,7 @@ import { ModelControls } from './ModelControls';
 import { parseAgentMentions } from '@/lib/messages/agentMentions';
 import { CONTEXT_METADATA_KEY, draftFromContextPayload } from '@/lib/messages/contextParts';
 import { shouldSubmitEnter } from './composer/keyboardPolicy';
-import { ghostTextDismissalsAfter, ghostTextKeyAction, visibleGhostText, type GhostTextDismissals } from './composer/state/ghostText';
+import { ghostTextDismissalsAfter, ghostTextKeyAction, ghostTextKeyStopsAtComposer, visibleGhostText, type GhostTextDismissals } from './composer/state/ghostText';
 import { getDropdownNavigationKey } from '@/components/ui/dropdown-navigation';
 import { useChatColumnActions, useChatColumnExpandedInput, useChatColumnSession, type ChatColumnSession } from './chatColumnSession';
 import { usePinnedComposerSelection } from './pinnedComposerSelection';
@@ -2473,7 +2473,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const ghostTextAction = ghostTextKeyAction(e, { visible: ghostTextValue !== null, autocompleteOpen: openAutocomplete !== null });
         if (ghostTextValue && (ghostTextAction === 'accept' || ghostTextAction === 'dismiss')) {
             e.preventDefault();
-            e.stopPropagation();
+            if (ghostTextKeyStopsAtComposer(ghostTextAction)) e.stopPropagation();
             if (ghostTextAction === 'accept') applyAssistSuggestion(ghostTextValue);
             else dismissGhostText();
             return;

@@ -133,9 +133,13 @@ hiding rules plus four of its own: a keyboard layout, an empty document
 (whitespace counts as content here), normal mode, and a payload not yet used
 up. While no picker is open, plain Tab inserts the text through the chips'
 path (caret at the end, focused, not sent); Escape dismisses and does nothing
-else, ahead of the expanded-mode Escape; a typed character dismisses and
-types. Any edit that fills the empty composer and any paste, including one
-that becomes an attachment, dismiss too. Without visible ghost text Tab keeps
+else, ahead of the expanded-mode Escape. That Escape still bubbles, prevented,
+so the double-Escape stop counts it as one the composer spent on itself and
+disarms; ghost text needs an idle session anyway, while the stop needs a
+running one. A typed character dismisses and types. Any edit that fills the
+empty composer and any paste, including one that becomes an attachment or
+waits on the large-paste choice, dismiss too; typing and pasting with nothing
+focused reach the same handlers. Without visible ghost text Tab keeps
 its `cycle_agent` meaning, and Shift+Tab always does.
 Taking a suggestion (Tab, a chip, the row) replaces the text as one undo step
 of its own (`replaceAllAsOwnStep` in `editor/documentEdits.ts`), so typing
