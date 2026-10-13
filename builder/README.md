@@ -9,6 +9,7 @@ Betriebsskripte für den Builder (xcode-builder), auf dem der LaunchAgent
 - `switch-to-npm.sh`: Rückweg auf die npm-Installation.
 - `lib/activity.sh`: gemeinsame Aktivitätsprüfung vor jedem Neustart.
 - `lib/phase.sh`: Einmal-Nachweis und zweite Prüfung der abgekoppelten Neustartphase.
+- `lib/startscript.sh`: strenger Parser für das Startskript und Prüfung von Sicherungen.
 - `test/activity-test.sh`: Tests mit temporärer SQLite-DB und gemocktem `ps`, `curl`, `launchctl` (`sh builder/test/activity-test.sh`).
 
 `~/Projects/openchamber-upstream/switch-to-*.sh` sind Symlinks hierher.
@@ -53,13 +54,24 @@ direkt unter `~/Projects`), dann:
 SWITCH_RELEASE=~/Projects/openchamber-release-<sha> EXPECTED_COMMIT=<voller sha> sh switch-to-fork.sh
 ```
 
-- Das Startskript muss genau einen `cli.js`-Pfad enthalten, und der muss die npm-Version oder ein erlaubter
-  Fork-Release-Pfad (`~/Projects/openchamber-release*/packages/web/bin/cli.js`, eigenes Wort) sein. Nur
-  dieser Pfad wird ersetzt (Temp-Datei, 0700, `mv`). Alles andere bricht ohne Änderung ab.
+- Das Startskript muss genau diese Form haben (`lib/startscript.sh`), sonst Abbruch ohne Änderung:
+  Zeile 1 `#!/bin/sh`, Zeile 2 `exec '<node>' '<cli.js>' 'serve' …`, nichts sonst. Alle Argumente einfach
+  gequotet ohne eingebettetes `'`, durch genau ein Leerzeichen getrennt, nichts nach dem letzten Quote.
+  Das zweite Argument muss exakt die npm-`cli.js` oder ein erlaubter Fork-Release-Pfad
+  (`~/Projects/openchamber-release[-A-Za-z0-9._]*/packages/web/bin/cli.js`) sein. Nur dieses Argument
+  wird ersetzt (Temp-Datei, 0700, `mv`). Phase 1 prüft die Form schon lesend vor allem anderen, Phase 2
+  prüft sie, den Commit (`EXPECTED_COMMIT`) und den sauberen Release-Worktree vor und nach dem Warten erneut.
 - Vor einem Fork->Fork-Wechsel sichert Phase 2 das bisherige Startskript als
   `OpenChamber.fork-<alter-sha12>.bak` (ohne lesbaren Commit: Zeitstempel; bestehende Sicherungen werden
-  nie überschrieben) und nennt im Log den Rückweg.
-- Die npm-Sicherung `OpenChamber.npm-2.2.0.bak` bleibt die Basis für `switch-to-npm.sh`.
+  nie überschrieben), erst wenn die neue Fassung fertig geprüft in der Temp-Datei liegt, und nennt im
+  Log den Rückweg.
+- Neue Sicherungen entstehen mit `umask 077`. Vorhandene Sicherungen (npm wie Fork) werden nur
+  wiederverwendet, wenn sie reguläre Dateien (kein Symlink) des aktuellen Nutzers ohne Rechte für Gruppe
+  und Welt sind; sonst Abbruch mit Hinweis, es wird nichts still korrigiert.
+- Die npm-Sicherung `OpenChamber.npm-2.2.0.bak` bleibt die Basis für `switch-to-npm.sh`, auch nach
+  Fork->Fork-Wechseln: `sh switch-to-npm.sh` stellt das Startskript aus ihr her. Fehlt sie, tauscht
+  `switch-to-npm.sh` nur den Pfad aus `SWITCH_RELEASE` zurück; dann `SWITCH_RELEASE=<aktueller Fork-Pfad>`
+  setzen (der Worktree, auf den das Startskript gerade zeigt).
 - Rückweg auf den alten Fork-Stand (alter Worktree muss noch existieren):
   `SWITCH_RELEASE=<alter pfad> EXPECTED_COMMIT=<alter sha> sh switch-to-fork.sh`. Der alte Worktree
   darf deshalb erst gelöscht werden, wenn der neue Stand sicher läuft.

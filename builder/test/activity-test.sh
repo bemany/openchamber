@@ -390,7 +390,7 @@ quiet; DBF="$TMP/fehlt/keine.sqlite"
 check "DB fehlt -> blockiert" 1 "BLOCK  DB nicht lesbar"
 quiet; new_db; session s1 "x"; msg s1 1 idle $((NOW - H))
 # Sperre halten, bis der Test sie freigibt; erst prüfen, wenn sie nachweislich greift
-( printf 'begin exclusive;\n'; i=0; while [ ! -f "$MOCK/unlock" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+( printf '.timeout 5000\nbegin exclusive;\n'; i=0; while [ ! -f "$MOCK/unlock" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
   printf 'commit;\n' ) | sqlite3 "$DBF" &
 i=0; while sqlite3 -readonly "$DBF" "select 1" >/dev/null 2>&1 && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 check "DB gesperrt -> blockiert" 1 "database is locked"
@@ -411,6 +411,8 @@ NPMCLI="$TMP/npm/bin/cli.js"
 cat > "$MOCK/live" <<'EOF'
 #!/bin/sh
 n=$(( $(cat "$MOCK/live.n" 2>/dev/null || echo 0) + 1 )); echo $n > "$MOCK/live.n"
+# live.hook.<n>: Shell-Code, der vor der Antwort läuft (z. B. Worktree ändern)
+[ ! -f "$MOCK/live.hook.$n" ] || . "$MOCK/live.hook.$n"
 # live.fail.<n>: Live-Status nicht abrufbar
 if [ -f "$MOCK/live.fail.$n" ]; then echo "Mock: Abfrage $n fehlgeschlagen"; exit 1; fi
 # live.wait.<n>: Handshake; Phase 2 (oberster Vorfahr mit " --restart ") merken
@@ -427,7 +429,7 @@ fi
 if [ -f "$MOCK/live.$n" ]; then cat "$MOCK/live.$n"; else cat "$MOCK/live.default"; fi
 EOF
 chmod +x "$MOCK/live"
-live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK"/live.fail.* "$MOCK"/live.wait.* "$MOCK/live.n" "$MOCK/go"; printf '%s' "$1" | tr ' ' '\n' > "$MOCK/live.default"; shift
+live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK"/live.fail.* "$MOCK"/live.wait.* "$MOCK"/live.hook.* "$MOCK/live.n" "$MOCK/go"; printf '%s' "$1" | tr ' ' '\n' > "$MOCK/live.default"; shift
   k=1; for v in "$@"; do printf '%s' "$v" | tr ' ' '\n' > "$MOCK/live.$k"; k=$((k + 1)); done; }
 
 script_env() {
@@ -440,8 +442,10 @@ script_env() {
 # Startskript zeigt auf <cli>; keine Sicherung, kein Log, kein launchctl-Aufruf
 reset_start() {
   rm -rf "$TMP/start" "$MOCK/launchctl.log" "$TMP/phase2.log" "$TMP/tmpdir"/*; mkdir -p "$TMP/start"
-  printf '#!/bin/sh\nexec /opt/node %s serve --port 3000\n' "$1" > "$TMP/start/OpenChamber"
-  cp "$TMP/start/OpenChamber" "$TMP/start.orig"
+  # Format wie in der Produktion (lib/startscript.sh): zwei Zeilen, Argumente einfach gequotet
+  printf "#!/bin/sh\nexec '/opt/node' '%s' 'serve' '--foreground' '--port' '3000'\n" "$1" > "$TMP/start/OpenChamber"
+  chmod 700 "$TMP/start/OpenChamber"
+  cp -p "$TMP/start/OpenChamber" "$TMP/start.orig"
 }
 called() { [ -s "$MOCK/launchctl.log" ] && echo 1 || echo 0; }
 unchanged() { cmp -s "$TMP/start/OpenChamber" "$TMP/start.orig" && echo 1 || echo 0; }
@@ -635,8 +639,7 @@ git -C "$OLDREL" init -q && git -C "$OLDREL" -c user.name=t -c user.email=t@t co
 OLDSHA=$(git -C "$OLDREL" rev-parse HEAD); OLDSHORT=$(printf '%.12s' "$OLDSHA")
 OLDCLI="$OLDREL/packages/web/bin/cli.js"
 # Startskript im Format der Produktion (Argumente in einfachen Anführungszeichen)
-start_quoted() { reset_start x; printf "#!/bin/sh\nexec '/opt/node' '%s' 'serve' '--foreground' '--port' '3000'\n" "$1" > "$TMP/start/OpenChamber"
-  chmod 700 "$TMP/start/OpenChamber"; cp -p "$TMP/start/OpenChamber" "$TMP/start.orig"; }
+start_quoted() { reset_start "$1"; }
 forkbaks() { ls "$TMP/start" | grep -c '\.fork-.*\.bak$'; }
 startcli() { grep -o "'[^']*cli\.js'" "$TMP/start/OpenChamber" | tr -d "'"; }
 
@@ -655,25 +658,95 @@ OUT=$(script_env sh "$SPF" 2>&1); RC=$?
 result "Fork->Fork ohne alten Commit: Sicherung mit Zeitstempel" "$(all "$([ $RC = 0 ] && echo 1)" "$(called)" "$([ "$(ls "$TMP/start" | grep -c '^OpenChamber\.fork-20[0-9]\{6\}-[0-9]\{6\}\.bak$')" = 1 ] && echo 1)")" "rc=$RC
 $(ls "$TMP/start")"
 
-db_s2; ps_idle; live_seq ''; start_quoted "$OLDCLI"; echo anders > "$TMP/start/OpenChamber.fork-$OLDSHORT.bak"
+db_s2; ps_idle; live_seq ''; start_quoted "$OLDCLI"; (umask 077 && echo anders > "$TMP/start/OpenChamber.fork-$OLDSHORT.bak")
 OUT=$(script_env sh "$SPF" 2>&1); RC=$?
 result "Fork->Fork: vorhandene fremde Fork-Sicherung bleibt, neue daneben" "$(all "$([ $RC = 0 ] && echo 1)" "$([ "$(cat "$TMP/start/OpenChamber.fork-$OLDSHORT.bak")" = anders ] && echo 1)" "$([ "$(forkbaks)" = 2 ] && echo 1)")" "rc=$RC
 $(ls "$TMP/start")"
 
-# Abbrüche ohne Änderung (npm-Sicherung vorhanden, damit Phase 1 bis zum Umschreiben kommt)
-abort_case() { # <name> <Startskript-Inhalt> <Meldung>
+# Abbrüche ohne Änderung: Phase 1 prüft das Startskript lesend (strenge Form) und
+# bricht vor Sicherung und Spawn ab
+npm_backup() { (umask 077 && printf "#!/bin/sh\nexec '/opt/node' '%s' 'serve'\n" "$NPMCLI" > "$TMP/start/OpenChamber.npm-2.2.0.bak"); }
+abort_case() { # <name> <Inhalt nach #!/bin/sh> <Meldung>
   db_s2; ps_idle; live_seq ''; reset_start x
-  printf '%s\n' "$2" > "$TMP/start/OpenChamber"; cp "$TMP/start/OpenChamber" "$TMP/start.orig"
-  printf 'exec /opt/node %s serve\n' "$NPMCLI" > "$TMP/start/OpenChamber.npm-2.2.0.bak"
+  printf '#!/bin/sh\n%s\n' "$2" > "$TMP/start/OpenChamber"; cp "$TMP/start/OpenChamber" "$TMP/start.orig"
+  npm_backup
   OUT=$(script_env sh "$SPF" 2>&1); RC=$?
-  result "$1" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$([ "$(forkbaks)" = 0 ] && echo 1)" "$(noTmp)" "$(loghas "$3")")" "rc=$RC
-$OUT
-$(cat "$TMP/phase2.log" 2>/dev/null)"
+  result "$1" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$([ "$(forkbaks)" = 0 ] && echo 1)" "$(noTmp)" "$(noproof)" "$(has "$3")")" "rc=$RC
+$OUT"
 }
-abort_case "Fremder cli.js-Pfad -> Abbruch ohne Änderung" "exec '/opt/node' '/opt/other/web/bin/cli.js' 'serve'" "weder auf die npm-Version noch auf einen erlaubten Fork"
-abort_case "Fork-Muster mit ../ -> Abbruch ohne Änderung" "exec '/opt/node' '$TMP/openchamber-release/../evil/packages/web/bin/cli.js' 'serve'" "weder auf die npm-Version noch auf einen erlaubten Fork"
-abort_case "Fork-Muster mit Präfix (kein eigenes Wort) -> Abbruch" "exec '/opt/node' '/x$TMP/openchamber-release-a/packages/web/bin/cli.js' 'serve'" "weder auf die npm-Version noch auf einen erlaubten Fork"
-abort_case "Zwei cli.js-Pfade -> Abbruch ohne Änderung" "exec '/opt/node' '$OLDCLI' 'serve' # $NPMCLI" "2 cli.js-Pfade"
+NOFORM="exec-Zeile hat nicht die Form"
+NOTALLOWED="weder die npm-Version noch ein erlaubter Fork-Release-Pfad"
+abort_case "Fremder cli.js-Pfad -> Abbruch ohne Änderung" "exec '/opt/node' '/opt/other/web/bin/cli.js' 'serve'" "$NOTALLOWED"
+abort_case "Fork-Muster mit ../ -> Abbruch ohne Änderung" "exec '/opt/node' '$TMP/openchamber-release/../evil/packages/web/bin/cli.js' 'serve'" "$NOTALLOWED"
+abort_case "Fork-Muster mit Präfix -> Abbruch" "exec '/opt/node' '/x$TMP/openchamber-release-a/packages/web/bin/cli.js' 'serve'" "$NOTALLOWED"
+abort_case "'…cli.js'.disabled -> Abbruch ohne Änderung" "exec '/opt/node' '$OLDCLI'.disabled 'serve'" "$NOFORM"
+abort_case "Pfad nur im Kommentar -> Abbruch ohne Änderung" "exec '/opt/node' '/opt/other/cli.js' 'serve' # '$OLDCLI'" "$NOFORM"
+abort_case "Kommentarzeile mit Pfad vor exec -> Abbruch ohne Änderung" "# '$OLDCLI'
+exec '/opt/node' '$OLDCLI' 'serve'" "mehr als zwei Zeilen"
+abort_case "Zwei exec-Zeilen -> Abbruch ohne Änderung" "exec '/opt/node' '$OLDCLI' 'serve'
+exec '/opt/node' '$NPMCLI' 'serve'" "mehr als zwei Zeilen"
+abort_case "Unquotierte Argumente -> Abbruch ohne Änderung" "exec /opt/node $OLDCLI serve" "$NOFORM"
+abort_case "Doppelte Anführungszeichen -> Abbruch ohne Änderung" "exec \"/opt/node\" \"$OLDCLI\" \"serve\"" "$NOFORM"
+abort_case "Zwei Leerzeichen zwischen Argumenten -> Abbruch" "exec '/opt/node'  '$OLDCLI' 'serve'" "$NOFORM"
+abort_case "Drittes Argument nicht serve -> Abbruch" "exec '/opt/node' '$OLDCLI' 'start'" "erwartet exec"
+abort_case "Node-Pfad relativ -> Abbruch" "exec 'node' '$OLDCLI' 'serve'" "Node-Pfad nicht absolut"
+db_s2; ps_idle; live_seq ''; reset_start x; printf "#!/bin/bash\nexec '/opt/node' '%s' 'serve'\n" "$OLDCLI" > "$TMP/start/OpenChamber"; cp "$TMP/start/OpenChamber" "$TMP/start.orig"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+result "Anderer Interpreter -> Abbruch ohne Änderung" "$(all "$([ $RC = 1 ] && echo 1)" "$(unchanged)" "$(has 'Zeile 1 ist nicht #!/bin/sh')")" "rc=$RC
+$OUT"
+
+# Vorhandene Sicherungen nur privat wiederverwenden, nie still korrigieren
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"; npm_backup; chmod 644 "$TMP/start/OpenChamber.npm-2.2.0.bak"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+result "npm-Sicherung 0644 -> Abbruch, Rechte unverändert" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'kein privates reguläres eigenes File')" "$(unchanged)" "$(called | tr 1 2 | tr 0 1)" "$([ "$(ls -l "$TMP/start/OpenChamber.npm-2.2.0.bak" | cut -c1-10)" = "-rw-r--r--" ] && echo 1)")" "rc=$RC
+$OUT"
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"; npm_backup; mv "$TMP/start/OpenChamber.npm-2.2.0.bak" "$TMP/npmbak"; ln -s "$TMP/npmbak" "$TMP/start/OpenChamber.npm-2.2.0.bak"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+result "npm-Sicherung als Symlink -> Abbruch" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'kein privates reguläres eigenes File')" "$(unchanged)")" "rc=$RC
+$OUT"
+db_s2; ps_idle; live_seq ''; start_quoted "$OLDCLI"; cp "$TMP/start/OpenChamber" "$TMP/start/OpenChamber.fork-$OLDSHORT.bak"; chmod 644 "$TMP/start/OpenChamber.fork-$OLDSHORT.bak"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+result "Fork-Sicherung 0644 vorhanden -> Abbruch in Phase 2, Startskript unverändert" "$(all "$([ $RC = 1 ] && echo 1)" "$(loghas 'kein privates reguläres eigenes File')" "$(unchanged)" "$(called | tr 1 2 | tr 0 1)" "$(noTmp)")" "rc=$RC
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+result "Neue npm-Sicherung ohne Rechte für Gruppe/Welt" "$(all "$([ $RC = 0 ] && echo 1)" "$([ "$(ls -l "$TMP/start/OpenChamber.npm-2.2.0.bak" | cut -c5-10)" = "------" ] && echo 1)")" "rc=$RC
+$(ls -l "$TMP/start")"
+
+# Phase 2 prüft Release-Worktree und Startskript erneut
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"
+PRF=$(TMPDIR="$TMP/tmpdir"; die() { exit 1; }; . "$HERE/../lib/phase.sh"; phase_proof_create; echo "$PROOF_DIR $PROOF_TOKEN")
+OUT=$(script_env EXPECTED_COMMIT=0000000000000000000000000000000000000000 SWITCH_PROOF_DIR="${PRF% *}" SWITCH_PROOF_TOKEN="${PRF#* }" sh "$SPF" --restart 0 2>&1); RC=$?
+result "Phase 2: Release-Worktree nicht auf EXPECTED_COMMIT -> kein Neustart" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'erwartet 0000000000000000000000000000000000000000')" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)")" "rc=$RC
+$OUT"
+db_s2; ps_idle; live_seq ''; reset_start x; printf '#!/bin/sh\nexec /opt/node %s serve\n' "$NPMCLI" > "$TMP/start/OpenChamber"; cp "$TMP/start/OpenChamber" "$TMP/start.orig"
+PRF=$(TMPDIR="$TMP/tmpdir"; die() { exit 1; }; . "$HERE/../lib/phase.sh"; phase_proof_create; echo "$PROOF_DIR $PROOF_TOKEN")
+OUT=$(script_env SWITCH_PROOF_DIR="${PRF% *}" SWITCH_PROOF_TOKEN="${PRF#* }" sh "$SPF" --restart 0 2>&1); RC=$?
+result "Phase 2: Startskript in falscher Form -> kein Neustart" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'kein Neustart')" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)")" "rc=$RC
+$OUT"
+echo dirty > "$REL/dirty.txt"; git -C "$REL" add dirty.txt
+db_s2; ps_idle; live_seq ''; reset_start "$NPMCLI"
+PRF=$(TMPDIR="$TMP/tmpdir"; die() { exit 1; }; . "$HERE/../lib/phase.sh"; phase_proof_create; echo "$PROOF_DIR $PROOF_TOKEN")
+OUT=$(script_env SWITCH_PROOF_DIR="${PRF% *}" SWITCH_PROOF_TOKEN="${PRF#* }" sh "$SPF" --restart 0 2>&1); RC=$?
+result "Phase 2: Release-Worktree mit Änderungen -> kein Neustart" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'lokale Änderungen')" "$(called | tr 1 2 | tr 0 1)")" "rc=$RC
+$OUT"
+git -C "$REL" rm -q --cached dirty.txt; rm -f "$REL/dirty.txt"
+
+# Worktree wird erst während des Wartens auf den Aufrufer geändert: die erneute
+# Prüfung nach dem Warten verhindert den Neustart
+ign_db; ps_idle; live_seq '' 'me'; reset_start "$NPMCLI"
+printf 'echo dirty > "%s/dirty.txt"; git -C "%s" add dirty.txt\n' "$REL" "$REL" > "$MOCK/live.hook.1"
+PRF=$(TMPDIR="$TMP/tmpdir"; die() { exit 1; }; . "$HERE/../lib/phase.sh"; phase_proof_create; echo "$PROOF_DIR $PROOF_TOKEN")
+OUT=$(script_env ACTIVITY_IGNORE_SESSION=me SWITCH_PROOF_DIR="${PRF% *}" SWITCH_PROOF_TOKEN="${PRF#* }" sh "$SPF" --restart 0 2>&1); RC=$?
+result "Phase 2: Worktree während des Wartens geändert -> kein Neustart" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'Aufrufer-Sessions auch nach')" "$(has 'lokale Änderungen')" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)")" "rc=$RC
+$OUT"
+git -C "$REL" rm -q --cached dirty.txt; rm -f "$REL/dirty.txt"
+
+# Phase 1 prüft die Form vor allem anderen: auch bei Aktivität kommt zuerst der Formfehler
+db_s2; ps_idle; live_seq 's2'; reset_start x; printf "#!/bin/sh\nexec '/opt/node' '%s'.disabled 'serve'\n" "$NPMCLI" > "$TMP/start/OpenChamber"; cp "$TMP/start/OpenChamber" "$TMP/start.orig"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+result "Phase 1: Formfehler vor der Aktivitätsprüfung" "$(all "$([ $RC = 1 ] && echo 1)" "$(has "$NOFORM")" "$(has 'Ergebnis' | tr 1 2 | tr 0 1)" "$(unchanged)")" "rc=$RC
+$OUT"
 
 # Idempotent: Startskript zeigt schon auf den neuen Fork
 db_s2; ps_idle; live_seq ''; start_quoted "$FORKCLI"

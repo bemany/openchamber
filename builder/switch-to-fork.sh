@@ -48,6 +48,7 @@ die() { echo "[switch-to-fork] FEHLER: $*" >&2; exit 1; }
 ACTIVITY_TAG="[switch-to-fork]"
 . "$BUILDER_DIR/lib/activity.sh"
 . "$BUILDER_DIR/lib/phase.sh"
+. "$BUILDER_DIR/lib/startscript.sh"
 runs() { activity_runs_cli "$1"; }
 
 # Nur prüfen: vor jedem anderen Zweig, endet immer ohne Seiteneffekte (Exit 1 = aktiv)
@@ -61,76 +62,31 @@ fi
 TMP="$START.tmp.$$"
 trap 'rm -f "$TMP"' EXIT
 
-CLI_SUFFIX="/packages/web/bin/cli.js"
-
-# Ist $1 ein erlaubter Fork-Release-Pfad? $RELEASE_ROOT/openchamber-release<x>/packages/web/bin/cli.js,
-# <x> nur aus [-A-Za-z0-9._] (kein /, also kein Ausbruch aus $RELEASE_ROOT).
-fork_cli_ok() {
-  case "$1" in "$RELEASE_ROOT/openchamber-release"*"$CLI_SUFFIX") ;; *) return 1 ;; esac
-  _mid=${1#"$RELEASE_ROOT/openchamber-release"}
-  _mid=${_mid%"$CLI_SUFFIX"}
-  case "$_mid" in *[!-A-Za-z0-9._]*) return 1 ;; esac
-}
-
-# Alle Vorkommen von $2 (Literal) in Datei $1 als eigenes Wort (begrenzt durch
-# Anfang/Ende, Leerzeichen, Tab oder Anführungszeichen), eine Zeile pro Treffer.
-# $2 = "fork": stattdessen alle erlaubten Fork-Release-Pfade.
-cli_tokens() {
-  awk -v lit="$2" -v pre="$RELEASE_ROOT/openchamber-release" -v suf="$CLI_SUFFIX" '
-    function bound(c) { return c == "" || c == " " || c == "\t" || c == "\"" || c == "\047" }
-    {
-      line = $0; off = 0
-      while (1) {
-        key = (lit == "fork") ? pre : lit
-        i = index(line, key); if (i == 0) break
-        before = (i > 1) ? substr(line, i - 1, 1) : ""
-        rest = substr(line, i + length(key))
-        if (lit == "fork") {
-          j = index(rest, suf)
-          if (j > 0) {
-            mid = substr(rest, 1, j - 1)
-            after = substr(rest, j + length(suf), 1)
-            if (mid ~ /^[-A-Za-z0-9._]*$/ && bound(before) && bound(after)) print pre mid suf
-          }
-        } else if (bound(before) && bound(substr(rest, 1, 1))) print lit
-        line = rest
-      }
-    }' "$1"
-}
-
-# Startskript auf $FORK_CLI umschreiben. Erlaubt nur, wenn es genau einen
-# cli.js-Pfad enthält und der die npm-Version oder ein erlaubter Fork-Release-Pfad
-# ist; alles andere bricht ohne Änderung ab. Vor einem Fork->Fork-Wechsel wird das
-# bisherige Startskript als OpenChamber.fork-<alter-sha|zeitstempel>.bak gesichert.
-# Atomar per Temp-Datei und mv (0700).
+# Startskript auf $FORK_CLI umschreiben. Erlaubt nur in der strengen Form aus
+# lib/startscript.sh, deren cli.js-Argument die npm-Version oder ein erlaubter
+# Fork-Release-Pfad ist; alles andere bricht ohne Änderung ab. Vor einem
+# Fork->Fork-Wechsel wird das bisherige Startskript als
+# OpenChamber.fork-<alter-sha12|zeitstempel>.bak gesichert, erst nachdem die
+# neue Fassung fertig und geprüft in der Temp-Datei liegt. Atomar per mv (0700).
 rewrite_start() {
-  [ -f "$START" ] || die "$START fehlt"
   fork_cli_ok "$FORK_CLI" || die "$FORK_CLI ist kein erlaubter Fork-Release-Pfad ($RELEASE_ROOT/openchamber-release*$CLI_SUFFIX)"
-  _all=$(grep -o 'cli\.js' "$START" | grep -c .) || _all=0
-  _npm=$(cli_tokens "$START" "$NPM_CLI" | grep -c .) || _npm=0
-  _forks=$(cli_tokens "$START" fork)
-  _nf=$(printf '%s' "$_forks" | grep -c .) || _nf=0
-  [ "$_all" = 1 ] || die "Startskript enthält $_all cli.js-Pfade statt genau einem; nicht geändert. Bitte prüfen."
-  if [ "$_nf" = 1 ] && [ "$_forks" = "$FORK_CLI" ]; then
+  _old=$(start_cli "$START") || die "$_old; nicht geändert. Bitte prüfen."
+  if [ "$_old" = "$FORK_CLI" ]; then
     say "Startskript zeigt schon auf den Fork ($FORK_CLI)"
     return 0
   fi
-  if [ "$_npm" = 1 ] && [ "$_nf" = 0 ]; then
-    _old=$NPM_CLI
-  elif [ "$_nf" = 1 ] && [ "$_npm" = 0 ]; then
-    _old=$_forks
-    backup_fork "$_old"
-  else
-    die "Startskript zeigt weder auf die npm-Version noch auf einen erlaubten Fork-Release-Pfad; nicht geändert. Bitte prüfen."
-  fi
-  awk -v old="$_old" -v new="$FORK_CLI" '
-    !done && (i = index($0, old)) > 0 { $0 = substr($0, 1, i - 1) new substr($0, i + length(old)); done = 1 }
-    { print }' "$START" > "$TMP"
-  [ "$(cli_tokens "$TMP" "$FORK_CLI" | grep -c .)" = 1 ] && [ "$(grep -o 'cli\.js' "$TMP" | grep -c .)" = 1 ] ||
-    die "Pfadersetzung fehlgeschlagen"
+  (umask 077 && start_rewrite "$START" "$FORK_CLI" > "$TMP") || die "Pfadersetzung fehlgeschlagen"
+  _new=$(start_cli "$TMP") && [ "$_new" = "$FORK_CLI" ] || die "Pfadersetzung fehlgeschlagen"
   chmod 700 "$TMP"
+  [ "$_old" = "$NPM_CLI" ] || backup_fork "$_old"
   mv "$TMP" "$START"
   say "Startskript umgestellt: $_old -> $FORK_CLI"
+}
+
+# Vorhandene Sicherung nur wiederverwenden, wenn sie privat ist (reguläre Datei,
+# eigene, Gruppe/Welt ohne Rechte); sonst Abbruch, nicht still korrigieren.
+backup_reusable() {
+  private_file_ok "$1" || die "Sicherung $1 ist kein privates reguläres eigenes File (Symlink, fremd oder Rechte für Gruppe/Welt). Bitte prüfen."
 }
 
 # Sicherung des Startskripts vor einem Fork->Fork-Wechsel. Name mit dem Commit des
@@ -140,29 +96,45 @@ backup_fork() {
   _full=$(git -C "$_rel" rev-parse HEAD 2>/dev/null) || _full=
   case "$_full" in '' | *[!0-9a-f]*) _full=; _sha=$(date +%Y%m%d-%H%M%S) ;; *) _sha=$(printf '%.12s' "$_full") ;; esac
   _fb="$START.fork-$_sha.bak"
-  if [ -e "$_fb" ]; then
+  if [ -e "$_fb" ] || [ -L "$_fb" ]; then
+    backup_reusable "$_fb"
     if cmp -s "$START" "$_fb"; then
       say "Fork-Sicherung vorhanden: $_fb"
       return 0
     fi
     _fb="$START.fork-$_sha-$(date +%Y%m%d-%H%M%S).bak"
-    [ ! -e "$_fb" ] || die "Fork-Sicherung $_fb existiert schon"
+    [ ! -e "$_fb" ] && [ ! -L "$_fb" ] || die "Fork-Sicherung $_fb existiert schon"
   fi
-  cp -p "$START" "$_fb" || die "Fork-Sicherung $_fb fehlgeschlagen"
+  (umask 077 && cp "$START" "$_fb") || die "Fork-Sicherung $_fb fehlgeschlagen"
   say "Fork-Sicherung angelegt: $_fb (Rückweg: SWITCH_RELEASE=$_rel EXPECTED_COMMIT=${_full:-<alter Commit>} sh switch-to-fork.sh)"
 }
 
-# Sicherung (nur einmal, und nur wenn sie wirklich die npm-Version enthält)
+# npm-Sicherung (nur einmal, und nur wenn sie wirklich die npm-Version enthält)
 ensure_backup() {
-  if [ ! -f "$BACKUP" ]; then
-    [ -z "$(cli_tokens "$START" fork)" ] || { say "Startskript zeigt schon auf einen Fork, keine npm-Sicherung nötig"; return 0; }
-    grep -qF "$NPM_CLI" "$START" || die "$START zeigt nicht auf die npm-Version, Sicherung wäre falsch. Bitte prüfen."
-    cp -p "$START" "$BACKUP"
+  _cur=$(start_cli "$START") || die "$_cur"
+  if [ ! -e "$BACKUP" ] && [ ! -L "$BACKUP" ]; then
+    if fork_cli_ok "$_cur"; then
+      say "Startskript zeigt schon auf einen Fork, keine npm-Sicherung nötig"
+      return 0
+    fi
+    (umask 077 && cp "$START" "$BACKUP") || die "Sicherung $BACKUP fehlgeschlagen"
     say "Sicherung angelegt: $BACKUP"
   else
-    grep -qF "$NPM_CLI" "$BACKUP" || die "$BACKUP enthält nicht den npm-Pfad"
+    backup_reusable "$BACKUP"
+    _b=$(start_cli "$BACKUP") && [ "$_b" = "$NPM_CLI" ] || die "$BACKUP enthält nicht die npm-Version"
     say "Sicherung vorhanden: $BACKUP"
   fi
+}
+
+# Release-Worktree: erlaubter Pfad, gebaut, auf EXPECTED_COMMIT, sauber (Phase 1 und 2)
+check_release() {
+  fork_cli_ok "$FORK_CLI" || die "$FORK_CLI ist kein erlaubter Fork-Release-Pfad ($RELEASE_ROOT/openchamber-release*$CLI_SUFFIX)"
+  [ -f "$FORK_CLI" ] || die "$FORK_CLI fehlt"
+  [ -f "$RELEASE/packages/web/dist/index.html" ] || die "dist fehlt, erst 'bun run build:web' im Release-Worktree"
+  [ -d "$RELEASE/node_modules" ] || die "node_modules fehlt, erst 'bun install' im Release-Worktree"
+  HEAD=$(git -C "$RELEASE" rev-parse HEAD) || die "Release-Worktree $RELEASE ist kein Git-Worktree"
+  [ "$HEAD" = "$EXPECTED_COMMIT" ] || die "Release-Worktree steht auf $HEAD, erwartet $EXPECTED_COMMIT (EXPECTED_COMMIT=… setzen, wenn gewollt)"
+  [ -z "$(git -C "$RELEASE" status --porcelain --untracked-files=no)" ] || die "Release-Worktree hat lokale Änderungen"
 }
 
 # Interne Phase (abgekoppelt): Nachweis verbrauchen, warten/zweite Prüfung,
@@ -170,7 +142,10 @@ ensure_backup() {
 if [ "${1:-}" = "--restart" ]; then
   phase_proof_claim
   ERR_LINES="${2:-0}"
+  check_release
+  _cur=$(start_cli "$START") || die "$_cur; kein Neustart."
   phase_gate
+  check_release
   rewrite_start
   echo "Neustart $(date)"
   $LAUNCHCTL kickstart -k "$SERVICE"
@@ -190,15 +165,9 @@ if [ "${1:-}" = "--restart" ]; then
 fi
 [ $# -eq 0 ] || die "Unbekanntes Argument: $1"
 
-# 1. Release-Worktree prüfen
-fork_cli_ok "$FORK_CLI" || die "$FORK_CLI ist kein erlaubter Fork-Release-Pfad ($RELEASE_ROOT/openchamber-release*$CLI_SUFFIX)"
-[ -f "$FORK_CLI" ] || die "$FORK_CLI fehlt"
-[ -f "$RELEASE/packages/web/dist/index.html" ] || die "dist fehlt, erst 'bun run build:web' im Release-Worktree"
-[ -d "$RELEASE/node_modules" ] || die "node_modules fehlt, erst 'bun install' im Release-Worktree"
-HEAD=$(git -C "$RELEASE" rev-parse HEAD)
-[ "$HEAD" = "$EXPECTED_COMMIT" ] || die "Release-Worktree steht auf $HEAD, erwartet $EXPECTED_COMMIT (EXPECTED_COMMIT=… setzen, wenn gewollt)"
-[ -z "$(git -C "$RELEASE" status --porcelain --untracked-files=no)" ] || die "Release-Worktree hat lokale Änderungen"
-[ -f "$START" ] || die "$START fehlt"
+# 1. Release-Worktree und Startskript (strenge Form, nur lesend) prüfen
+check_release
+_cur=$(start_cli "$START") || die "$_cur; nichts geändert."
 
 # 2. Läuft der Fork schon? Dann nur Sicherung/Startskript angleichen, ohne Prüfung und Neustart.
 if runs "$FORK_CLI"; then

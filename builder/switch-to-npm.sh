@@ -44,6 +44,7 @@ die() { echo "[switch-to-npm] FEHLER: $*" >&2; exit 1; }
 ACTIVITY_TAG="[switch-to-npm]"
 . "$BUILDER_DIR/lib/activity.sh"
 . "$BUILDER_DIR/lib/phase.sh"
+. "$BUILDER_DIR/lib/startscript.sh"
 runs() { activity_runs_cli "$1"; }
 
 # Nur prüfen: vor jedem anderen Zweig, endet immer ohne Seiteneffekte (Exit 1 = aktiv)
@@ -62,6 +63,8 @@ restore_start() {
   [ -f "$START" ] || die "$START fehlt, Startskript von Hand prüfen"
   if grep -qF "$NPM_CLI" "$START"; then
     say "Startskript zeigt schon auf npm"
+  elif { [ -e "$BACKUP" ] || [ -L "$BACKUP" ]; } && ! private_file_ok "$BACKUP"; then
+    die "Sicherung $BACKUP ist kein privates reguläres eigenes File (Symlink, fremd oder Rechte für Gruppe/Welt). Bitte prüfen."
   elif [ -f "$BACKUP" ] && grep -qF "$NPM_CLI" "$BACKUP"; then
     cp -p "$BACKUP" "$TMP"
     mv "$TMP" "$START"
