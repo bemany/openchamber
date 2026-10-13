@@ -3,7 +3,9 @@
 Betriebsskripte für den Builder (xcode-builder), auf dem der LaunchAgent
 `dev.openchamber.web` OpenChamber auf Port 3000 startet. Nicht für upstream.
 
-- `switch-to-fork.sh`: Startskript auf den Release-Worktree (`~/Projects/openchamber-release`) umstellen, abgekoppelt neu starten, prüfen.
+- `switch-to-fork.sh`: Startskript auf einen Release-Worktree (`~/Projects/openchamber-release*`, Default
+  `~/Projects/openchamber-release`, sonst `SWITCH_RELEASE=<pfad> EXPECTED_COMMIT=<sha>`) umstellen,
+  abgekoppelt neu starten, prüfen. Von npm oder von einem anderen Fork-Stand aus.
 - `switch-to-npm.sh`: Rückweg auf die npm-Installation.
 - `lib/activity.sh`: gemeinsame Aktivitätsprüfung vor jedem Neustart.
 - `lib/phase.sh`: Einmal-Nachweis und zweite Prüfung der abgekoppelten Neustartphase.
@@ -41,6 +43,28 @@ Ablauf:
 **Verbleibendes Rennfenster** (nach der zweiten Prüfung): zwischen dem Ende der zweiten Prüfung und dem Kickstart liegen nur das
 Umschreiben des Startskripts (Millisekunden), die Prüfung selbst dauert etwa 1 bis 3 s (curl-Timeout 3 s).
 Ein Zug, der genau in diesen Sekunden startet, kann noch abbrechen.
+
+## Fork-Stand wechseln (Fork -> Fork)
+
+Neuen Release-Worktree daneben bauen (Name muss `openchamber-release` gefolgt von `[-A-Za-z0-9._]*` sein,
+direkt unter `~/Projects`), dann:
+
+```sh
+SWITCH_RELEASE=~/Projects/openchamber-release-<sha> EXPECTED_COMMIT=<voller sha> sh switch-to-fork.sh
+```
+
+- Das Startskript muss genau einen `cli.js`-Pfad enthalten, und der muss die npm-Version oder ein erlaubter
+  Fork-Release-Pfad (`~/Projects/openchamber-release*/packages/web/bin/cli.js`, eigenes Wort) sein. Nur
+  dieser Pfad wird ersetzt (Temp-Datei, 0700, `mv`). Alles andere bricht ohne Änderung ab.
+- Vor einem Fork->Fork-Wechsel sichert Phase 2 das bisherige Startskript als
+  `OpenChamber.fork-<alter-sha12>.bak` (ohne lesbaren Commit: Zeitstempel; bestehende Sicherungen werden
+  nie überschrieben) und nennt im Log den Rückweg.
+- Die npm-Sicherung `OpenChamber.npm-2.2.0.bak` bleibt die Basis für `switch-to-npm.sh`.
+- Rückweg auf den alten Fork-Stand (alter Worktree muss noch existieren):
+  `SWITCH_RELEASE=<alter pfad> EXPECTED_COMMIT=<alter sha> sh switch-to-fork.sh`. Der alte Worktree
+  darf deshalb erst gelöscht werden, wenn der neue Stand sicher läuft.
+- „Läuft schon“ bleibt pfadgenau: Läuft der alte Fork, wird umgeschaltet; läuft schon der neue, nicht.
+- `SWITCH_RELEASE_ROOT` (Default `~/Projects`) setzt nur die Tests anders.
 
 ## Aus einer Agent-Session umschalten
 

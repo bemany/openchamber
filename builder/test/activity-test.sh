@@ -399,7 +399,7 @@ check "DB gesperrt -> blockiert" 1 "database is locked"
 # === Umschaltskripte: Phase 1, --check, Nachweis, zweite Prüfung =================
 # Alles gemockt: Startskript, Release-Worktree und npm-cli in $TMP, launchctl/curl
 # als Skripte, Live-Status über einen Zähler-Mock, Phase 2 synchron (SWITCH_SYNC=1).
-REL="$TMP/release"
+REL="$TMP/openchamber-release"
 mkdir -p "$REL/packages/web/bin" "$REL/packages/web/dist" "$REL/node_modules" "$TMP/npm/bin" "$TMP/tmpdir"
 git -C "$REL" init -q && git -C "$REL" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
 : > "$REL/packages/web/bin/cli.js"; : > "$REL/packages/web/dist/index.html"; : > "$TMP/npm/bin/cli.js"
@@ -431,7 +431,7 @@ live_seq() { rm -f "$MOCK"/live.[0-9]* "$MOCK"/live.fail.* "$MOCK"/live.wait.* "
   k=1; for v in "$@"; do printf '%s' "$v" | tr ' ' '\n' > "$MOCK/live.$k"; k=$((k + 1)); done; }
 
 script_env() {
-  env SWITCH_RELEASE="$REL" EXPECTED_COMMIT="$RELHEAD" SWITCH_NPM_CLI="$NPMCLI" SWITCH_START="$TMP/start/OpenChamber" \
+  env SWITCH_RELEASE_ROOT="$TMP" SWITCH_RELEASE="$REL" EXPECTED_COMMIT="$RELHEAD" SWITCH_NPM_CLI="$NPMCLI" SWITCH_START="$TMP/start/OpenChamber" \
     SWITCH_ERRLOG="$TMP/err.log" SWITCH_LAUNCHCTL="$MOCK/launchctl" SWITCH_CURL="$MOCK/health" \
     SWITCH_SYNC=1 LOG="$TMP/phase2.log" TMPDIR="$TMP/tmpdir" \
     ACTIVITY_DB="$DBF" ACTIVITY_NOW_MS=$NOW ACTIVITY_PS_CMD="cat $MOCK/ps" ACTIVITY_LIVE_CMD="$MOCK/live" \
@@ -626,6 +626,67 @@ $OUT
 $(cat "$TMP/phase2.log" 2>/dev/null)"
   result "$S: nohup-Pfad: Nachweis verbraucht, keine Nachweis-Variablen bei launchctl" "$(all "$(noproof)" "$([ -f "$MOCK/launchctl.env" ] && [ ! -s "$MOCK/launchctl.env" ] && echo 1)")" "$(ls -A "$TMP/tmpdir"; cat "$MOCK/launchctl.env" 2>/dev/null | sed 's/=.*/=<…>/')"
 done
+
+# === switch-to-fork.sh: Fork -> Fork, fremde Pfade, Idempotenz ===================
+SPF="$HERE/../switch-to-fork.sh"
+OLDREL="$TMP/openchamber-release-old"
+mkdir -p "$OLDREL/packages/web/bin"; : > "$OLDREL/packages/web/bin/cli.js"
+git -C "$OLDREL" init -q && git -C "$OLDREL" -c user.name=t -c user.email=t@t commit -q --allow-empty -m alt
+OLDSHA=$(git -C "$OLDREL" rev-parse HEAD); OLDSHORT=$(printf '%.12s' "$OLDSHA")
+OLDCLI="$OLDREL/packages/web/bin/cli.js"
+# Startskript im Format der Produktion (Argumente in einfachen Anführungszeichen)
+start_quoted() { reset_start x; printf "#!/bin/sh\nexec '/opt/node' '%s' 'serve' '--foreground' '--port' '3000'\n" "$1" > "$TMP/start/OpenChamber"
+  chmod 700 "$TMP/start/OpenChamber"; cp -p "$TMP/start/OpenChamber" "$TMP/start.orig"; }
+forkbaks() { ls "$TMP/start" | grep -c '\.fork-.*\.bak$'; }
+startcli() { grep -o "'[^']*cli\.js'" "$TMP/start/OpenChamber" | tr -d "'"; }
+
+db_s2; ps_idle; live_seq ''; start_quoted "$OLDCLI"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+FB="$TMP/start/OpenChamber.fork-$OLDSHORT.bak"
+result "Fork->Fork: Startskript auf neuen Fork umgeschrieben, Neustart" "$(all "$([ $RC = 0 ] && echo 1)" "$(called)" "$([ "$(startcli)" = "$FORKCLI" ] && echo 1)" "$(loghas "Startskript umgestellt: $OLDCLI -> $FORKCLI")")" "rc=$RC
+$(cat "$TMP/start/OpenChamber")
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+result "Fork->Fork: Fork-Sicherung mit altem Commit, Inhalt und Rechte wie Original" "$(all "$([ -f "$FB" ] && echo 1)" "$(cmp -s "$FB" "$TMP/start.orig" && echo 1)" "$([ "$(ls -l "$FB" | cut -c1-10)" = "-rwx------" ] && echo 1)" "$(loghas "Fork-Sicherung angelegt: $FB")" "$(loghas "EXPECTED_COMMIT=$OLDSHA")")" "$(ls -l "$TMP/start")
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+result "Fork->Fork: npm-Sicherung wird dabei nicht angelegt" "$([ ! -e "$TMP/start/OpenChamber.npm-2.2.0.bak" ] && echo 1 || echo 0)" "$(ls "$TMP/start")"
+
+db_s2; ps_idle; live_seq ''; start_quoted "$TMP/openchamber-release-nogit/packages/web/bin/cli.js"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+result "Fork->Fork ohne alten Commit: Sicherung mit Zeitstempel" "$(all "$([ $RC = 0 ] && echo 1)" "$(called)" "$([ "$(ls "$TMP/start" | grep -c '^OpenChamber\.fork-20[0-9]\{6\}-[0-9]\{6\}\.bak$')" = 1 ] && echo 1)")" "rc=$RC
+$(ls "$TMP/start")"
+
+db_s2; ps_idle; live_seq ''; start_quoted "$OLDCLI"; echo anders > "$TMP/start/OpenChamber.fork-$OLDSHORT.bak"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+result "Fork->Fork: vorhandene fremde Fork-Sicherung bleibt, neue daneben" "$(all "$([ $RC = 0 ] && echo 1)" "$([ "$(cat "$TMP/start/OpenChamber.fork-$OLDSHORT.bak")" = anders ] && echo 1)" "$([ "$(forkbaks)" = 2 ] && echo 1)")" "rc=$RC
+$(ls "$TMP/start")"
+
+# Abbrüche ohne Änderung (npm-Sicherung vorhanden, damit Phase 1 bis zum Umschreiben kommt)
+abort_case() { # <name> <Startskript-Inhalt> <Meldung>
+  db_s2; ps_idle; live_seq ''; reset_start x
+  printf '%s\n' "$2" > "$TMP/start/OpenChamber"; cp "$TMP/start/OpenChamber" "$TMP/start.orig"
+  printf 'exec /opt/node %s serve\n' "$NPMCLI" > "$TMP/start/OpenChamber.npm-2.2.0.bak"
+  OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+  result "$1" "$(all "$([ $RC = 1 ] && echo 1)" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)" "$([ "$(forkbaks)" = 0 ] && echo 1)" "$(noTmp)" "$(loghas "$3")")" "rc=$RC
+$OUT
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+}
+abort_case "Fremder cli.js-Pfad -> Abbruch ohne Änderung" "exec '/opt/node' '/opt/other/web/bin/cli.js' 'serve'" "weder auf die npm-Version noch auf einen erlaubten Fork"
+abort_case "Fork-Muster mit ../ -> Abbruch ohne Änderung" "exec '/opt/node' '$TMP/openchamber-release/../evil/packages/web/bin/cli.js' 'serve'" "weder auf die npm-Version noch auf einen erlaubten Fork"
+abort_case "Fork-Muster mit Präfix (kein eigenes Wort) -> Abbruch" "exec '/opt/node' '/x$TMP/openchamber-release-a/packages/web/bin/cli.js' 'serve'" "weder auf die npm-Version noch auf einen erlaubten Fork"
+abort_case "Zwei cli.js-Pfade -> Abbruch ohne Änderung" "exec '/opt/node' '$OLDCLI' 'serve' # $NPMCLI" "2 cli.js-Pfade"
+
+# Idempotent: Startskript zeigt schon auf den neuen Fork
+db_s2; ps_idle; live_seq ''; start_quoted "$FORKCLI"
+OUT=$(script_env sh "$SPF" 2>&1); RC=$?
+result "Startskript schon auf neuem Fork -> unverändert, keine Fork-Sicherung" "$(all "$([ $RC = 0 ] && echo 1)" "$(unchanged)" "$([ "$(forkbaks)" = 0 ] && echo 1)" "$(loghas 'Startskript zeigt schon auf den Fork')")" "rc=$RC
+$(cat "$TMP/phase2.log" 2>/dev/null)"
+
+# Ziel-Release außerhalb des erlaubten Musters -> Phase 1 bricht ab
+mkdir -p "$TMP/anderes/packages/web/bin"; : > "$TMP/anderes/packages/web/bin/cli.js"
+db_s2; ps_idle; live_seq ''; start_quoted "$OLDCLI"
+OUT=$(script_env SWITCH_RELEASE="$TMP/anderes" sh "$SPF" 2>&1); RC=$?
+result "SWITCH_RELEASE außerhalb des Musters -> Abbruch in Phase 1" "$(all "$([ $RC = 1 ] && echo 1)" "$(has 'kein erlaubter Fork-Release-Pfad')" "$(called | tr 1 2 | tr 0 1)" "$(unchanged)")" "rc=$RC
+$OUT"
 
 # switch-to-npm.sh: Startskript fehlt -> sauberer Abbruch vor sed, keine Temp-Datei
 db_s2; ps_idle; live_seq ''; reset_start "$FORKCLI"; rm -f "$TMP/start/OpenChamber"
